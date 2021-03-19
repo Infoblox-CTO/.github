@@ -1,0 +1,8 @@
+{
+  "name": "Go PR linter",
+  "description": "Annotates PRs with issues found by golangci-lint. Enable additional linters in .golandci.yml: https://golangci-lint.run/usage/configuration/#config-file",
+  "iconName": "golangci",
+  "categories": [
+    "Go"
+  ]
+}
