@@ -1,0 +1,15 @@
+{
+  "name": "Wiz Security Scan",
+  "description": "Enforce security scanning on Docker images using Wiz CLI. Blocks builds on policy violations (vulnerabilities, secrets, malware).",
+  "iconName": "shield-check",
+  "categories": [
+    "Security",
+    "Deployment",
+    "Docker"
+  ],
+  "filePatterns": [
+    "Dockerfile",
+    "docker/**",
+    "go.mod"
+  ]
+}
