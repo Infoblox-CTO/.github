@@ -1,0 +1,475 @@
+name: Reusable Wiz Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      dockerfile-path:
+        description: 'Path to Dockerfile relative to repo root (e.g., docker/Dockerfile, Dockerfile, build/Dockerfile)'
+        required: false
+        type: string
+        default: ''  # Auto-detect if not specified
+      enable-vendor-regen:
+        description: 'Regenerate Go vendor directory before build (only needed for specific Go version mismatches)'
+        required: false
+        type: boolean
+        default: false
+      scan-timeout-minutes:
+        description: 'Timeout for Wiz security scan in minutes'
+        required: false
+        type: number
+        default: 15
+    secrets:
+      GITPAT:
+        required: true
+        description: 'GitHub Personal Access Token for private repo access'
+      WIZ_CLIENT_ID:
+        required: true
+        description: 'Wiz service account client ID'
+      WIZ_CLIENT_SECRET:
+        required: true
+        description: 'Wiz service account client secret'
+      HARBOR_SERVICES_PROD_USERNAME:
+        required: true
+        description: 'Harbor registry username for pulling base images'
+      HARBOR_SERVICES_PROD_PASSWORD:
+        required: true
+        description: 'Harbor registry password for pulling base images'
+
+jobs:
+  wiz-scan:
+    name: Wiz Security Scan
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      pull-requests: write
+      
+    steps:
+      - name: Validate required secrets
+        run: |
+          if [ -z "${{ secrets.WIZ_CLIENT_ID }}" ] || [ -z "${{ secrets.WIZ_CLIENT_SECRET }}" ]; then
+            echo "::error::Missing required secrets: WIZ_CLIENT_ID and WIZ_CLIENT_SECRET must be configured"
+            exit 1
+          fi
+          if [ -z "${{ secrets.GITPAT }}" ]; then
+            echo "::error::Missing required secret: GITPAT must be configured for private repo access"
+            exit 1
+          fi
+          if [ -z "${{ secrets.HARBOR_SERVICES_PROD_USERNAME }}" ] || [ -z "${{ secrets.HARBOR_SERVICES_PROD_PASSWORD }}" ]; then
+            echo "::error::Missing required secrets: HARBOR_SERVICES_PROD_USERNAME and HARBOR_SERVICES_PROD_PASSWORD must be configured"
+            exit 1
+          fi
+      
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure Git for private repos
+        run: |
+          git config --global url."https://${{ secrets.GITPAT }}@github.com/".insteadOf "https://github.com/"
+      
+      - name: Regenerate vendor directory
+        if: inputs.enable-vendor-regen == true
+        run: |
+          echo "Regenerating Go vendor directory..."
+          go version
+          go mod tidy
+          go mod vendor
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to Harbor Registry
+        uses: docker/login-action@v3
+        with:
+          registry: harbor.services.sdp.infoblox.com
+          username: ${{ secrets.HARBOR_SERVICES_PROD_USERNAME }}
+          password: ${{ secrets.HARBOR_SERVICES_PROD_PASSWORD }}
+      
+      - name: Build Docker image
+        id: build
+        run: |
+          # Determine Dockerfile path
+          if [ -n "${{ inputs.dockerfile-path }}" ]; then
+            DOCKERFILE_PATH="${{ inputs.dockerfile-path }}"
+            if [ ! -f "$DOCKERFILE_PATH" ]; then
+              echo "::error::Specified Dockerfile not found: $DOCKERFILE_PATH"
+              exit 1
+            fi
+          else
+            # Auto-detect common locations
+            if [ -f "Dockerfile" ]; then
+              DOCKERFILE_PATH="Dockerfile"
+            elif [ -f "docker/Dockerfile" ]; then
+              DOCKERFILE_PATH="docker/Dockerfile"
+            elif [ -f "build/Dockerfile" ]; then
+              DOCKERFILE_PATH="build/Dockerfile"
+            else
+              echo "::error::No Dockerfile found. Checked: Dockerfile, docker/Dockerfile, build/Dockerfile"
+              echo "::error::Please specify dockerfile-path input parameter"
+              exit 1
+            fi
+          fi
+          
+          echo "Building from: $DOCKERFILE_PATH (context: repository root)"
+          docker build -f "$DOCKERFILE_PATH" -t scan-target:${{ github.sha }} .
+          
+          # Save image size for reporting
+          IMAGE_SIZE=$(docker inspect scan-target:${{ github.sha }} --format='{{.Size}}')
+          echo "image_size=$IMAGE_SIZE" >> $GITHUB_OUTPUT
+      
+      - name: Cache Wiz CLI
+        id: cache-wizcli
+        uses: actions/cache@v4
+        with:
+          path: /tmp/wizcli
+          key: wizcli-${{ runner.os }}-latest
+      
+      - name: Install Wiz CLI
+        if: steps.cache-wizcli.outputs.cache-hit != 'true'
+        run: |
+          curl -o /tmp/wizcli https://downloads.wiz.io/wizcli/latest/wizcli-linux-amd64
+          chmod +x /tmp/wizcli
+      
+      - name: Setup Wiz CLI
+        run: |
+          sudo cp /tmp/wizcli /usr/local/bin/wizcli
+          wizcli version
+      
+      - name: Authenticate Wiz CLI
+        env:
+          WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+          WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+        run: |
+          wizcli auth --id "$WIZ_CLIENT_ID" --secret "$WIZ_CLIENT_SECRET"
+      
+      - name: Run Wiz Security Scan
+        id: scan
+        continue-on-error: true
+        timeout-minutes: ${{ inputs.scan-timeout-minutes }}
+        run: |
+          echo "Scanning Docker image: scan-target:${{ github.sha }}"
+          echo "Running comprehensive security scan with 3 policies..."
+          echo ""
+          
+          set +e
+          wizcli docker scan --image "scan-target:${{ github.sha }}" \
+            --policy "Code Blocking - Vulnerabilities" \
+            --policy "Code Blocking - Secrets" \
+            --policy "Code Blocking - Malware" \
+            --format json \
+            --detailed \
+            --file-hashes-scan 2>&1 > wiz-results.json
+          
+          SCAN_EXIT_CODE=$?
+          set -e
+          
+          echo "scan_exit_code=${SCAN_EXIT_CODE}" >> $GITHUB_OUTPUT
+          
+          # Validate JSON output
+          if [ ! -f "wiz-results.json" ]; then
+            echo "::error::Wiz scan did not produce results file"
+            echo '{"result":{"analytics":{"vulnerabilities":{},"secrets":{},"malware":{}}}}' > wiz-results.json
+          elif ! jq empty wiz-results.json 2>/dev/null; then
+            echo "::warning::Wiz results file is not valid JSON, creating empty result"
+            echo '{"result":{"analytics":{"vulnerabilities":{},"secrets":{},"malware":{}}}}' > wiz-results.json
+          fi
+          
+          # Parse metrics
+          VULN_TOTAL=$(jq -r '.result.analytics.vulnerabilities.totalCount // 0' wiz-results.json)
+          VULN_CRITICAL=$(jq -r '.result.analytics.vulnerabilities.criticalCount // 0' wiz-results.json)
+          VULN_HIGH=$(jq -r '.result.analytics.vulnerabilities.highCount // 0' wiz-results.json)
+          VULN_MEDIUM=$(jq -r '.result.analytics.vulnerabilities.mediumCount // 0' wiz-results.json)
+          VULN_LOW=$(jq -r '.result.analytics.vulnerabilities.lowCount // 0' wiz-results.json)
+          VULN_INFO=$(jq -r '.result.analytics.vulnerabilities.infoCount // 0' wiz-results.json)
+          
+          SECRETS_TOTAL=$(jq -r '.result.analytics.secrets.totalCount // 0' wiz-results.json)
+          SECRETS_PASSWORDS=$(jq -r '.result.analytics.secrets.passwordCount // 0' wiz-results.json)
+          SECRETS_KEYS=$(jq -r '.result.analytics.secrets.privateKeyCount // 0' wiz-results.json)
+          SECRETS_CLOUD=$(jq -r '.result.analytics.secrets.cloudKeyCount // 0' wiz-results.json)
+          
+          MALWARE_TOTAL=$(jq -r '.result.analytics.malware.totalCount // 0' wiz-results.json)
+          MALWARE_CRITICAL=$(jq -r '.result.analytics.malware.criticalCount // 0' wiz-results.json)
+          MALWARE_HIGH=$(jq -r '.result.analytics.malware.highCount // 0' wiz-results.json)
+          
+          # Extract base image from Dockerfile for display
+          BASE_IMAGE=$(find . -name Dockerfile -exec grep -m1 '^FROM' {} \; | awk '{print $2}' | head -1)
+          
+          # Store outputs
+          echo "vuln_total=${VULN_TOTAL}" >> $GITHUB_OUTPUT
+          echo "vuln_critical=${VULN_CRITICAL}" >> $GITHUB_OUTPUT
+          echo "vuln_high=${VULN_HIGH}" >> $GITHUB_OUTPUT
+          echo "vuln_medium=${VULN_MEDIUM}" >> $GITHUB_OUTPUT
+          echo "secrets_total=${SECRETS_TOTAL}" >> $GITHUB_OUTPUT
+          echo "malware_total=${MALWARE_TOTAL}" >> $GITHUB_OUTPUT
+          
+          # Get failed policies from Wiz scan result
+          FAILED_POLICIES=$(jq -r '.result.failedPolicyMatches[]?.policy.name' wiz-results.json | paste -sd "," - || echo "")
+          
+          # If still empty but scan failed with non-zero exit code, show generic message
+          if [ ${SCAN_EXIT_CODE} -ne 0 ] && [ -z "${FAILED_POLICIES}" ]; then
+            FAILED_POLICIES="Policy evaluation failed (check scan output for details)"
+          fi
+          
+          echo "failed_policies=${FAILED_POLICIES}" >> $GITHUB_OUTPUT
+          
+          # Display comprehensive summary
+          echo "## Wiz Security Scan Results (ENFORCEMENT MODE)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> **ENFORCEMENT MODE ACTIVE** - Policy violations will BLOCK this PR from merging." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`scan-target:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Policies Applied:** 3 (Vulnerabilities, Secrets, Malware)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Policy Status Table
+          echo "### Policy Compliance Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Policy | Status | Findings |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|--------|----------|" >> $GITHUB_STEP_SUMMARY
+          
+          # Vulnerability policy threshold: HIGH+ (configured in Wiz Console)
+          if [ "${VULN_HIGH}" -gt 0 ] || [ "${VULN_CRITICAL}" -gt 0 ]; then
+            echo "| Vulnerabilities (High+) | **BLOCKED** | ${VULN_TOTAL} total (${VULN_CRITICAL} Critical, ${VULN_HIGH} High, ${VULN_MEDIUM} Medium, ${VULN_LOW} Low, ${VULN_INFO} Info) |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Vulnerabilities (High+) | PASSED | ${VULN_TOTAL} total (${VULN_MEDIUM} Medium, ${VULN_LOW} Low, ${VULN_INFO} Info) |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${SECRETS_TOTAL}" -gt 0 ]; then
+            echo "| Secrets | **BLOCKED** | ${SECRETS_TOTAL} secrets found (${SECRETS_PASSWORDS} passwords, ${SECRETS_KEYS} keys, ${SECRETS_CLOUD} cloud keys) |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Secrets | PASSED | No secrets detected |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${MALWARE_TOTAL}" -gt 0 ]; then
+            echo "| Malware | **BLOCKED** | ${MALWARE_TOTAL} malware detected (${MALWARE_CRITICAL} Critical, ${MALWARE_HIGH} High) |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Malware | PASSED | No malware detected |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Detailed Vulnerability Breakdown
+          if [ "${VULN_TOTAL}" -gt 0 ]; then
+            echo "### Vulnerability Details" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**CVE Count by Severity:**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Severity | CVEs Found |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|------------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Critical | ${VULN_CRITICAL} |" >> $GITHUB_STEP_SUMMARY
+            echo "| High | ${VULN_HIGH} |" >> $GITHUB_STEP_SUMMARY
+            echo "| Medium | ${VULN_MEDIUM} |" >> $GITHUB_STEP_SUMMARY
+            echo "| Low | ${VULN_LOW} |" >> $GITHUB_STEP_SUMMARY
+            echo "| Info | ${VULN_INFO} |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            # Show specific HIGH/CRITICAL vulnerabilities
+            if [ "${VULN_HIGH}" -gt 0 ] || [ "${VULN_CRITICAL}" -gt 0 ]; then
+              echo "#### Packages to Fix (grouped by package)" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "| Source | Package | Version | Location | Severity | Fix Available |" >> $GITHUB_STEP_SUMMARY
+              echo "|--------|---------|---------|----------|----------|---------------|" >> $GITHUB_STEP_SUMMARY
+              
+              # Extract HIGH/CRITICAL vulnerabilities from libraries
+              jq -r '.result.libraries[]? | select(.vulnerabilities != null) | 
+                . as $lib | 
+                {
+                  source: "Library",
+                  name: $lib.name,
+                  version: $lib.version,
+                  path: $lib.path,
+                  highCritVulns: [.vulnerabilities[] | select((.severity == "HIGH" or .severity == "CRITICAL") and .fixedVersion != null)]
+                } | 
+                select(.highCritVulns | length > 0) |
+                select(.path | test("^/usr/local/lib") | not) |
+                .highestSeverity = (if (.highCritVulns | map(select(.severity == "CRITICAL")) | length > 0) then "CRITICAL" else "HIGH" end) |
+                .fixVersion = (.highCritVulns[0].fixedVersion) |
+                "\(.source)|\(.name)|\(.version)|\(.path)|\(.highestSeverity)|\(.fixVersion)"' \
+                wiz-results.json 2>/dev/null | sort -u | \
+                while IFS='|' read -r source pkg_name pkg_version location severity fix; do
+                  echo "| ${source} | ${pkg_name} | ${pkg_version} | \`${location}\` | ${severity} | ${fix} |" >> $GITHUB_STEP_SUMMARY
+                done
+              
+              # Consolidate Platform vulnerabilities
+              PLATFORM_VULNS=$(jq -r '[.result.cpes[]? | select(.vulnerabilities != null) | .vulnerabilities[] | select((.severity == "HIGH" or .severity == "CRITICAL") and .fixedVersion != null)] | length' wiz-results.json 2>/dev/null)
+              if [ "${PLATFORM_VULNS}" -gt 0 ]; then
+                PLATFORM_SEVERITY=$(jq -r '[.result.cpes[]? | select(.vulnerabilities != null) | .vulnerabilities[] | select(.severity == "CRITICAL")] | if length > 0 then "CRITICAL" else "HIGH" end' wiz-results.json 2>/dev/null)
+                RECOMMENDED_VERSION=$(echo "${BASE_IMAGE}" | sed 's/:.*/:latest/' || echo "Update to newer base image")
+                echo "| Platform | Base image | ${BASE_IMAGE} | \`Dockerfile\` | ${PLATFORM_SEVERITY} | ${RECOMMENDED_VERSION} |" >> $GITHUB_STEP_SUMMARY
+              fi
+              
+              # OS Package vulnerabilities
+              OS_PKG_VULNS=$(jq -r '[.result.osPackages[]? | select(.vulnerabilities != null) | .vulnerabilities[] | select((.severity == "HIGH" or .severity == "CRITICAL") and .fixedVersion != null)] | length' wiz-results.json 2>/dev/null)
+              if [ "${OS_PKG_VULNS}" -gt 0 ]; then
+                OS_SEVERITY=$(jq -r '[.result.osPackages[]? | select(.vulnerabilities != null) | .vulnerabilities[] | select(.severity == "CRITICAL")] | if length > 0 then "CRITICAL" else "HIGH" end' wiz-results.json 2>/dev/null)
+                echo "| OS Package | System packages (${OS_PKG_VULNS} vulnerable) | ${BASE_IMAGE} | \`Dockerfile\` | ${OS_SEVERITY} | Update base image |" >> $GITHUB_STEP_SUMMARY
+              fi
+              
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Recommended Action:** Fix vulnerabilities listed above." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+          
+          # Detailed Secrets Breakdown
+          if [ "${SECRETS_TOTAL}" -gt 0 ]; then
+            echo "### Secret Detection Details" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Type | Location | Line | Description |" >> $GITHUB_STEP_SUMMARY
+            echo "|------|----------|------|-------------|" >> $GITHUB_STEP_SUMMARY
+            
+            jq -r '.result.secrets[]? | "\(.type)|\(.path)|\(.lineNumber // "N/A")|\(.description)"' wiz-results.json 2>/dev/null | \
+              while IFS='|' read -r type path line desc; do
+                echo "| ${type} | \`${path}\` | ${line} | ${desc} |" >> $GITHUB_STEP_SUMMARY
+              done
+            
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Recommended Action:** Remove hardcoded secrets and use environment variables or secrets management." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Detailed Malware Breakdown
+          if [ "${MALWARE_TOTAL}" -gt 0 ]; then
+            echo "### Malware Detection Details" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Severity | Location | Description |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|----------|-------------|" >> $GITHUB_STEP_SUMMARY
+            
+            jq -r '.result.malwares[]? | "\(.severity)|\(.path)|\(.description // "Malware detected")"' wiz-results.json 2>/dev/null | \
+              while IFS='|' read -r severity path desc; do
+                echo "| ${severity} | \`${path}\` | ${desc} |" >> $GITHUB_STEP_SUMMARY
+              done
+            
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Recommended Action:** Remove malicious files from the image." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Overall Result
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ ${SCAN_EXIT_CODE} -ne 0 ]; then
+            echo "### Build BLOCKED: Security Policy Violations" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Failed Policies:** ${FAILED_POLICIES}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**This PR cannot be merged until these issues are resolved.**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Required Actions:**" >> $GITHUB_STEP_SUMMARY
+            echo "1. Review the security findings above" >> $GITHUB_STEP_SUMMARY
+            echo "2. Fix all Critical and High severity vulnerabilities" >> $GITHUB_STEP_SUMMARY
+            echo "3. Remove any detected secrets or malware" >> $GITHUB_STEP_SUMMARY
+            echo "4. Push changes and re-run this scan" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "::error::Build blocked by security policy violations: ${FAILED_POLICIES}"
+          else
+            echo "### Build Approved: All Security Policies Passed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "This image meets all security requirements and is approved for deployment." >> $GITHUB_STEP_SUMMARY
+            echo "::notice::Wiz scan passed - All policies compliant"
+          fi
+          
+      
+      - name: Post PR Comment
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        env:
+          SCAN_EXIT_CODE: ${{ steps.scan.outputs.scan_exit_code }}
+          VULN_TOTAL: ${{ steps.scan.outputs.vuln_total }}
+          VULN_CRITICAL: ${{ steps.scan.outputs.vuln_critical }}
+          VULN_HIGH: ${{ steps.scan.outputs.vuln_high }}
+          SECRETS_TOTAL: ${{ steps.scan.outputs.secrets_total }}
+          MALWARE_TOTAL: ${{ steps.scan.outputs.malware_total }}
+          FAILED_POLICIES: ${{ steps.scan.outputs.failed_policies }}
+        with:
+          script: |
+            const exitCode = process.env.SCAN_EXIT_CODE;
+            const vulnTotal = process.env.VULN_TOTAL || '0';
+            const vulnCritical = process.env.VULN_CRITICAL || '0';
+            const vulnHigh = process.env.VULN_HIGH || '0';
+            const secretsTotal = process.env.SECRETS_TOTAL || '0';
+            const malwareTotal = process.env.MALWARE_TOTAL || '0';
+            const failedPolicies = process.env.FAILED_POLICIES || 'None';
+            
+            let statusText = 'All Policies Passed';
+            let alertLevel = '**This image is secure and ready for deployment.**';
+            
+            if (exitCode !== '0') {
+              statusText = 'Build BLOCKED - Security Policy Violations';
+              alertLevel = '**THIS PR CANNOT BE MERGED** - Critical security issues must be fixed before merging.';
+            }
+            
+            const summary = "## Wiz Security Scan Results (ENFORCEMENT MODE)\n\n" +
+              "> **ENFORCEMENT MODE ACTIVE** - Policy violations will BLOCK this PR from merging.\n\n" +
+              "### Overall Status: " + statusText + "\n\n" +
+              alertLevel + "\n\n" +
+              "---\n\n" +
+              "### Quick Summary\n\n" +
+              "| Policy | Status | Count |\n" +
+              "|--------|--------|-------|\n" +
+              "| Vulnerabilities | " + (vulnCritical > 0 || vulnHigh > 0 ? 'BLOCKED' : 'PASSED') + " | " + vulnTotal + " total (" + vulnCritical + " Critical, " + vulnHigh + " High) |\n" +
+              "| Secrets | " + (secretsTotal > 0 ? 'BLOCKED' : 'PASSED') + " | " + secretsTotal + " found |\n" +
+              "| Malware | " + (malwareTotal > 0 ? 'BLOCKED' : 'PASSED') + " | " + malwareTotal + " detected |\n\n" +
+              "**Failed Policies:** " + failedPolicies + "\n\n" +
+              "---\n\n" +
+              "### Full Details\n\n" +
+              "For complete vulnerability breakdown, package-specific fixes, and remediation steps:\n" +
+              "- View the **[Actions run summary](" + context.payload.repository.html_url + "/actions/runs/" + context.runId + ")**\n" +
+              "- Check the **Wiz CLI Security Scan** job output\n\n" +
+              "---\n\n" +
+              "<sub>This comment will be updated on each commit</sub>";
+            
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('Wiz Security Scan Results')
+            );
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: summary
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: summary
+              });
+            }
+      
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wiz-scan-results-${{ github.sha }}
+          path: wiz-results.json
+          retention-days: 90
+      
+      - name: Cleanup Docker images
+        if: always()
+        run: |
+          docker rmi scan-target:${{ github.sha }} || true
+          docker image prune -f || true
+      
+      - name: Enforce Security Policies
+        if: steps.scan.outputs.scan_exit_code != '0'
+        run: |
+          echo "::error::Security scan failed - Policy violations detected"
+          echo "::error::Failed policies: ${{ steps.scan.outputs.failed_policies }}"
+          echo ""
+          echo "Critical/High vulnerabilities: ${{ steps.scan.outputs.vuln_critical }}/${{ steps.scan.outputs.vuln_high }}"
+          echo "Secrets detected: ${{ steps.scan.outputs.secrets_total }}"
+          echo "Malware detected: ${{ steps.scan.outputs.malware_total }}"
+          echo ""
+          echo "This build is BLOCKED until security issues are resolved."
+          exit 1

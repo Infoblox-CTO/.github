@@ -1,0 +1,31 @@
+name: Wiz Security Scan
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+  push:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: wiz-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-scan:
+    name: Security Scan
+    uses: Infoblox-CTO/.github/.github/workflows/wiz-security-scan-reusable.yaml@main
+    secrets:
+      GITPAT: ${{ secrets.GITPAT }}
+      WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+      WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+      HARBOR_SERVICES_PROD_USERNAME: ${{ secrets.HARBOR_SERVICES_PROD_USERNAME }}
+      HARBOR_SERVICES_PROD_PASSWORD: ${{ secrets.HARBOR_SERVICES_PROD_PASSWORD }}
+    # Optional: Uncomment and customize if needed
+    # with:
+    #   dockerfile-path: 'docker/Dockerfile'  # Customize if your Dockerfile is not in standard location
+    #   enable-vendor-regen: false            # Set to true if Go version mismatch requires vendor regeneration
+    #   scan-timeout-minutes: 15              # Increase if scan times out
