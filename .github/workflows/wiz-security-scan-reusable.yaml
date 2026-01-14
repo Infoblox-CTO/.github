@@ -13,6 +13,11 @@ on:
         required: false
         type: boolean
         default: false
+      docker-build-args:
+        description: 'Docker build arguments as multiline string (e.g., "BASE_IMAGE=golang:1.23\nVERSION=1.0")'
+        required: false
+        type: string
+        default: ''
       scan-timeout-minutes:
         description: 'Timeout for Wiz security scan in minutes'
         required: false
@@ -67,13 +72,29 @@ jobs:
         run: |
           git config --global url."https://${{ secrets.GITPAT }}@github.com/".insteadOf "https://github.com/"
       
-      - name: Regenerate vendor directory
-        if: inputs.enable-vendor-regen == true
+      - name: Auto-detect and regenerate vendor directory
         run: |
-          echo "Regenerating Go vendor directory..."
-          go version
-          go mod tidy
-          go mod vendor
+          VENDOR_REGEN_NEEDED=false
+          
+          # Check if vendor regen is explicitly enabled
+          if [ "${{ inputs.enable-vendor-regen }}" = "true" ]; then
+            VENDOR_REGEN_NEEDED=true
+            echo "Vendor regeneration explicitly enabled via input"
+          # Auto-detect if vendor directory exists and might be stale
+          elif [ -d "vendor" ] && [ -f "go.mod" ]; then
+            VENDOR_REGEN_NEEDED=true
+            echo "Detected vendor/ directory - will regenerate to ensure compatibility"
+          fi
+          
+          if [ "$VENDOR_REGEN_NEEDED" = "true" ]; then
+            echo "Regenerating Go vendor directory..."
+            go version
+            go mod tidy
+            go mod vendor
+            echo "Vendor directory regenerated successfully"
+          else
+            echo "No vendor regeneration needed"
+          fi
       
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -111,12 +132,29 @@ jobs:
           fi
           
           echo "Building from: $DOCKERFILE_PATH (context: repository root)"
-          docker build -f "$DOCKERFILE_PATH" -t scan-target:${{ github.sha }} .
+          
+          # Build docker build command with optional build args
+          BUILD_CMD="docker build -f \"$DOCKERFILE_PATH\" -t scan-target:${{ github.sha }}"
+          
+          # Add build args if provided
+          if [ -n "${{ inputs.docker-build-args }}" ]; then
+            echo "Adding build arguments..."
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                BUILD_CMD="$BUILD_CMD --build-arg $line"
+                echo "  --build-arg $line"
+              fi
+            done <<< "${{ inputs.docker-build-args }}"
+          fi
+          
+          BUILD_CMD="$BUILD_CMD ."
+          
+          echo "Executing: $BUILD_CMD"
+          eval "$BUILD_CMD"
           
           # Save image size for reporting
           IMAGE_SIZE=$(docker inspect scan-target:${{ github.sha }} --format='{{.Size}}')
           echo "image_size=$IMAGE_SIZE" >> $GITHUB_OUTPUT
-      
       - name: Cache Wiz CLI
         id: cache-wizcli
         uses: actions/cache@v4
