@@ -213,8 +213,7 @@ jobs:
             --policy "Code Blocking - Malware" \
             --format json \
             --detailed \
-            --file-hashes-scan \
-            --output wiz-results.json
+            --file-hashes-scan > wiz-results.json
           
           SCAN_EXIT_CODE=$?
           
