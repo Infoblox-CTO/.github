@@ -8,6 +8,21 @@ on:
         required: false
         type: string
         default: ''  # Auto-detect if not specified
+      docker-context:
+        description: 'Docker build context directory (default: repository root ".")'
+        required: false
+        type: string
+        default: '.'
+      docker-build-args:
+        description: 'Docker build arguments as multiline string (e.g., "BASE_IMAGE=golang:1.23\nVERSION=1.0")'
+        required: false
+        type: string
+        default: ''
+      docker-build-secrets:
+        description: 'Docker build secrets as multiline string (e.g., "id=npm,src=.npmrc")'
+        required: false
+        type: string
+        default: ''
       enable-vendor-regen:
         description: 'Regenerate Go vendor directory before build (only needed for specific Go version mismatches)'
         required: false
@@ -67,13 +82,29 @@ jobs:
         run: |
           git config --global url."https://${{ secrets.GITPAT }}@github.com/".insteadOf "https://github.com/"
       
-      - name: Regenerate vendor directory
-        if: inputs.enable-vendor-regen == true
+      - name: Auto-detect and regenerate vendor directory
         run: |
-          echo "Regenerating Go vendor directory..."
-          go version
-          go mod tidy
-          go mod vendor
+          VENDOR_REGEN_NEEDED=false
+          
+          # Check if vendor regen is explicitly enabled
+          if [ "${{ inputs.enable-vendor-regen }}" = "true" ]; then
+            VENDOR_REGEN_NEEDED=true
+            echo "Vendor regeneration explicitly enabled via input"
+          # Auto-detect if vendor directory exists and might be stale
+          elif [ -d "vendor" ] && [ -f "go.mod" ]; then
+            VENDOR_REGEN_NEEDED=true
+            echo "Detected vendor/ directory - will regenerate to ensure compatibility"
+          fi
+          
+          if [ "$VENDOR_REGEN_NEEDED" = "true" ]; then
+            echo "Regenerating Go vendor directory..."
+            go version
+            go mod tidy
+            go mod vendor
+            echo "Vendor directory regenerated successfully"
+          else
+            echo "No vendor regeneration needed"
+          fi
       
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -87,6 +118,7 @@ jobs:
       
       - name: Build Docker image
         id: build
+        continue-on-error: true
         run: |
           # Determine Dockerfile path
           if [ -n "${{ inputs.dockerfile-path }}" ]; then
@@ -110,50 +142,53 @@ jobs:
             fi
           fi
           
-          echo "Building from: $DOCKERFILE_PATH (context: repository root)"
-          docker build -f "$DOCKERFILE_PATH" -t scan-target:${{ github.sha }} .
+          DOCKER_CONTEXT="${{ inputs.docker-context }}"
+          echo "Building from: $DOCKERFILE_PATH (context: $DOCKER_CONTEXT)"
+          
+          # Build docker build command
+          BUILD_CMD="docker build -f \"$DOCKERFILE_PATH\""
+          
+          # Add build args if provided
+          if [ -n "${{ inputs.docker-build-args }}" ]; then
+            echo "Adding build arguments..."
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                BUILD_CMD="$BUILD_CMD --build-arg $line"
+                echo "  --build-arg $line"
+              fi
+            done <<< "${{ inputs.docker-build-args }}"
+          fi
+          
+          # Add build secrets if provided
+          if [ -n "${{ inputs.docker-build-secrets }}" ]; then
+            echo "Adding build secrets..."
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                BUILD_CMD="$BUILD_CMD --secret $line"
+                echo "  --secret ${line%%,*}..."
+              fi
+            done <<< "${{ inputs.docker-build-secrets }}"
+          fi
+          
+          BUILD_CMD="$BUILD_CMD -t scan-target:${{ github.sha }} \"$DOCKER_CONTEXT\""
+          
+          echo "Executing: $BUILD_CMD"
+          set +e
+          eval "$BUILD_CMD"
+          BUILD_EXIT_CODE=$?
+          set -e
+          
+          echo "build_exit_code=$BUILD_EXIT_CODE" >> $GITHUB_OUTPUT
+          
+          if [ $BUILD_EXIT_CODE -ne 0 ]; then
+            echo "::error::Docker build failed with exit code $BUILD_EXIT_CODE"
+            exit $BUILD_EXIT_CODE
+          fi
           
           # Save image size for reporting
           IMAGE_SIZE=$(docker inspect scan-target:${{ github.sha }} --format='{{.Size}}')
           echo "image_size=$IMAGE_SIZE" >> $GITHUB_OUTPUT
-      
-      - name: Cache Wiz CLI
-        id: cache-wizcli
-        uses: actions/cache@v4
-        with:
-          path: /tmp/wizcli
-          key: wizcli-${{ runner.os }}-latest
-      
-      - name: Install Wiz CLI
-        if: steps.cache-wizcli.outputs.cache-hit != 'true'
-        run: |
-          curl -o /tmp/wizcli https://downloads.wiz.io/wizcli/latest/wizcli-linux-amd64
-          chmod +x /tmp/wizcli
-      
-      - name: Setup Wiz CLI
-        run: |
-          sudo cp /tmp/wizcli /usr/local/bin/wizcli
-          wizcli version
-      
-      - name: Authenticate Wiz CLI
-        env:
-          WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
-          WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
-        run: |
-          wizcli auth --id "$WIZ_CLIENT_ID" --secret "$WIZ_CLIENT_SECRET"
-      
-      - name: Run Wiz Security Scan
-        id: scan
-        continue-on-error: true
-        timeout-minutes: ${{ inputs.scan-timeout-minutes }}
-        run: |
-          echo "Scanning Docker image: scan-target:${{ github.sha }}"
-          echo "Running comprehensive security scan with 3 policies..."
-          echo ""
-          
-          set +e
-          wizcli docker scan --image "scan-target:${{ github.sha }}" \
-            --policy "Code Blocking - Vulnerabilities" \
+          echo "Docker build successful (image size: $IMAGE_SIZE bytes)"
             --policy "Code Blocking - Secrets" \
             --policy "Code Blocking - Malware" \
             --format json \
@@ -472,4 +507,66 @@ jobs:
           echo "Malware detected: ${{ steps.scan.outputs.malware_total }}"
           echo ""
           echo "This build is BLOCKED until security issues are resolved."
+          exit 1
+      
+      - name: Check Docker build status
+        if: steps.build.outcome == 'failure'
+        run: |
+          echo "::error::Docker build failed - cannot proceed with security scan"
+          echo "build_failed=true" >> $GITHUB_ENV
+      
+      - name: Post build failure comment
+        if: github.event_name == 'pull_request' && steps.build.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const summary = "## Docker Build Failed\n\n" +
+              ":x: **Docker image build failed - security scan cannot proceed**\n\n" +
+              "### Error Details\n" +
+              "The Docker build step failed. Please check the [Actions run logs](" + context.payload.repository.html_url + "/actions/runs/" + context.runId + ") for details.\n\n" +
+              "### Common Causes\n" +
+              "- Missing or incorrect build arguments (ARG directives without values)\n" +
+              "- Base image not accessible\n" +
+              "- Syntax errors in Dockerfile\n" +
+              "- Missing files referenced in COPY/ADD commands\n" +
+              "- Vendor directory issues (Go projects)\n\n" +
+              "### Next Steps\n" +
+              "1. Review the build error in the Actions log\n" +
+              "2. Fix the Dockerfile or workflow configuration\n" +
+              "3. Push changes to re-run the build\n\n" +
+              "---\n\n" +
+              "<sub>This comment will be updated on each commit</sub>";
+            
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              (comment.body.includes('Wiz Security Scan Results') || comment.body.includes('Docker Build Failed'))
+            );
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: summary
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: summary
+              });
+            }
+      
+      - name: Fail workflow if build failed
+        if: steps.build.outcome == 'failure'
+        run: |
+          echo "::error::Workflow failed due to Docker build failure"
           exit 1
