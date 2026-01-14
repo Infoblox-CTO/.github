@@ -195,25 +195,26 @@ jobs:
           echo "Downloading Wiz CLI..."
           curl -o wizcli https://downloads.wiz.io/wizcli/latest/wizcli-linux-amd64
           chmod +x wizcli
-          sudo mv wizcli /usr/local/bin/
-          wizcli version
+          sudo mv wizcli /usr/local/bin/wiz
+          wiz version
       
       - name: Authenticate with Wiz
         run: |
-          wizcli auth --id "${{ secrets.WIZ_CLIENT_ID }}" --secret "${{ secrets.WIZ_CLIENT_SECRET }}"
+          wiz auth --id "${{ secrets.WIZ_CLIENT_ID }}" --secret "${{ secrets.WIZ_CLIENT_SECRET }}"
       
       - name: Wiz CLI Security Scan
         id: scan
         timeout-minutes: ${{ inputs.scan-timeout-minutes }}
         run: |
           set +e
-          wizcli docker scan scan-target:${{ github.sha }} \
-            --policy "Code Blocking - Vulnerabilities" \
-            --policy "Code Blocking - Secrets" \
-            --policy "Code Blocking - Malware" \
+          wiz docker scan \
+            -i scan-target:${{ github.sha }} \
+            -p "Code Blocking - Vulnerabilities" \
+            -p "Code Blocking - Secrets" \
+            -p "Code Blocking - Malware" \
             --format json \
-            --detailed \
-            --file-hashes-scan > wiz-results.json
+            --file-hashes-scan \
+            --output wiz-results.json
           
           SCAN_EXIT_CODE=$?
           
