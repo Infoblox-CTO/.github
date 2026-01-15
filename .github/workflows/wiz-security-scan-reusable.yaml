@@ -190,25 +190,33 @@ jobs:
           echo "image_size=$IMAGE_SIZE" >> $GITHUB_OUTPUT
           echo "Docker build successful (image size: $IMAGE_SIZE bytes)"
 
+      - name: Install Wiz CLI
+        run: |
+          echo "Downloading Wiz CLI..."
+          curl -o wizcli https://downloads.wiz.io/wizcli/latest/wizcli-linux-amd64
+          chmod +x wizcli
+          sudo mv wizcli /usr/local/bin/wiz
+          wiz version
+      
+      - name: Authenticate with Wiz
+        run: |
+          wiz auth --id "${{ secrets.WIZ_CLIENT_ID }}" --secret "${{ secrets.WIZ_CLIENT_SECRET }}"
+      
       - name: Wiz CLI Security Scan
         id: scan
         timeout-minutes: ${{ inputs.scan-timeout-minutes }}
         run: |
           set +e
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -e WIZ_CLIENT_ID="${{ secrets.WIZ_CLIENT_ID }}" \
-            -e WIZ_CLIENT_SECRET="${{ secrets.WIZ_CLIENT_SECRET }}" \
-            wizcli/wizcli:latest \
-            docker scan scan-target:${{ github.sha }} \
-            --policy "Code Blocking - Vulnerabilities" \
-            --policy "Code Blocking - Malware" \
+          wiz docker scan \
+            -i scan-target:${{ github.sha }} \
+            -p "Code Blocking - Vulnerabilities" \
+            -p "Code Blocking - Secrets" \
+            -p "Code Blocking - Malware" \
             --format json \
-            --detailed \
-            --file-hashes-scan 2>&1 > wiz-results.json
+            --file-hashes-scan \
+            --output wiz-results.json
           
           SCAN_EXIT_CODE=$?
-          set -e
           
           echo "scan_exit_code=${SCAN_EXIT_CODE}" >> $GITHUB_OUTPUT
           
