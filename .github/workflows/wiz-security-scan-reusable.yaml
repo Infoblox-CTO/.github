@@ -228,25 +228,11 @@ jobs:
             # Check if file is valid JSON
             if ! jq empty wiz-results.json 2>/dev/null; then
               echo "::warning::Wiz output file contains non-JSON content, extracting JSON object"
-              # The Wiz CLI may print warnings before/after the JSON object
-              # Extract the JSON by finding the first { and matching closing }
-              python3 << 'PYEOF' 2>/dev/null
-import sys, json
-try:
-    content = open('wiz-results.json', 'r').read()
-    start = content.find('{')
-    if start == -1:
-        sys.exit(1)
-    content = content[start:]
-    decoder = json.JSONDecoder()
-    obj, idx = decoder.raw_decode(content)
-    with open('wiz-results-clean.json', 'w') as f:
-        json.dump(obj, f)
-except:
-    sys.exit(1)
-PYEOF
+              # The Wiz CLI may print warnings/messages mixed with JSON output
+              # Use grep to find lines containing JSON structure and reconstruct
+              grep -o '{.*}' wiz-results.json | head -1 > wiz-results-clean.json 2>/dev/null || true
               
-              if [ -f "wiz-results-clean.json" ] && jq empty wiz-results-clean.json 2>/dev/null; then
+              if [ -s "wiz-results-clean.json" ] && jq empty wiz-results-clean.json 2>/dev/null; then
                 mv wiz-results-clean.json wiz-results.json
                 echo "Successfully extracted valid JSON object"
               else
