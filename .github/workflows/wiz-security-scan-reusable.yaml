@@ -207,46 +207,28 @@ jobs:
         timeout-minutes: ${{ inputs.scan-timeout-minutes }}
         run: |
           set +e
-          wiz docker scan \
+          
+          # Capture output to variable and file, filtering warnings
+          WIZ_OUTPUT=$(wiz docker scan \
             -i scan-target:${{ github.sha }} \
             -p "Code Blocking - Vulnerabilities" \
             -p "Code Blocking - Secrets" \
             -p "Code Blocking - Malware" \
             --format json \
-            --file-hashes-scan \
-            --output wiz-results.json
+            --file-hashes-scan 2>&1)
           
           SCAN_EXIT_CODE=$?
-          
           echo "scan_exit_code=${SCAN_EXIT_CODE}" >> $GITHUB_OUTPUT
           
-          # Validate JSON output and extract if needed
-          if [ ! -f "wiz-results.json" ]; then
-            echo "::error::Wiz scan did not produce results file"
+          # Extract JSON from output (first complete JSON object)
+          # Wiz CLI may print warnings/messages before or after the JSON
+          echo "$WIZ_OUTPUT" | grep -o '{.*}' | head -1 > wiz-results.json 2>/dev/null || \
             echo '{"result":{"analytics":{"vulnerabilities":{},"secrets":{},"malware":{}}}}' > wiz-results.json
-          else
-            # Debug: show first and last lines of the file
-            echo "DEBUG: First line of wiz-results.json:"
-            head -c 200 wiz-results.json || true
-            echo ""
-            echo "DEBUG: Last 200 chars:"
-            tail -c 200 wiz-results.json || true
-            echo ""
-            
-            # Check if file is valid JSON
-            if ! jq empty wiz-results.json 2>/dev/null; then
-              echo "::warning::Wiz output file is not valid JSON, attempting to extract"
-              # Try using tr to remove any non-printable characters and extract JSON
-              cat wiz-results.json | tr -cd '[:print:]\n' | grep -o '{.*}' > wiz-results-clean.json 2>/dev/null || true
-              
-              if [ -s "wiz-results-clean.json" ] && jq empty wiz-results-clean.json 2>/dev/null; then
-                mv wiz-results-clean.json wiz-results.json
-                echo "Successfully extracted valid JSON object"
-              else
-                echo "::error::Could not extract valid JSON from Wiz output, creating empty result"
-                echo '{"result":{"analytics":{"vulnerabilities":{},"secrets":{},"malware":{}}}}' > wiz-results.json
-              fi
-            fi
+          
+          # Validate we got valid JSON
+          if ! jq empty wiz-results.json 2>/dev/null; then
+            echo "::error::Could not extract valid JSON from Wiz CLI output"
+            echo '{"result":{"analytics":{"vulnerabilities":{},"secrets":{},"malware":{}}}}' > wiz-results.json
           fi
           
           # Parse metrics
