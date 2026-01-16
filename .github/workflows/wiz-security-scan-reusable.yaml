@@ -225,12 +225,19 @@ jobs:
             echo "::error::Wiz scan did not produce results file"
             echo '{"result":{"analytics":{"vulnerabilities":{},"secrets":{},"malware":{}}}}' > wiz-results.json
           else
+            # Debug: show first and last lines of the file
+            echo "DEBUG: First line of wiz-results.json:"
+            head -c 200 wiz-results.json || true
+            echo ""
+            echo "DEBUG: Last 200 chars:"
+            tail -c 200 wiz-results.json || true
+            echo ""
+            
             # Check if file is valid JSON
             if ! jq empty wiz-results.json 2>/dev/null; then
-              echo "::warning::Wiz output file contains non-JSON content, extracting JSON object"
-              # The Wiz CLI may print warnings/messages mixed with JSON output
-              # Use grep to find lines containing JSON structure and reconstruct
-              grep -o '{.*}' wiz-results.json | head -1 > wiz-results-clean.json 2>/dev/null || true
+              echo "::warning::Wiz output file is not valid JSON, attempting to extract"
+              # Try using tr to remove any non-printable characters and extract JSON
+              cat wiz-results.json | tr -cd '[:print:]\n' | grep -o '{.*}' > wiz-results-clean.json 2>/dev/null || true
               
               if [ -s "wiz-results-clean.json" ] && jq empty wiz-results-clean.json 2>/dev/null; then
                 mv wiz-results-clean.json wiz-results.json
