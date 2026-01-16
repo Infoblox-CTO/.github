@@ -230,23 +230,21 @@ jobs:
               echo "::warning::Wiz output file contains non-JSON content, extracting JSON object"
               # The Wiz CLI may print warnings before/after the JSON object
               # Extract the JSON by finding the first { and matching closing }
-              python3 -c "
+              python3 << 'PYEOF' 2>/dev/null
 import sys, json
-content = open('wiz-results.json', 'r').read()
-# Find first { and extract from there
-start = content.find('{')
-if start == -1:
-    sys.exit(1)
-content = content[start:]
-# Parse the JSON to find the properly balanced closing }
 try:
+    content = open('wiz-results.json', 'r').read()
+    start = content.find('{')
+    if start == -1:
+        sys.exit(1)
+    content = content[start:]
     decoder = json.JSONDecoder()
     obj, idx = decoder.raw_decode(content)
     with open('wiz-results-clean.json', 'w') as f:
         json.dump(obj, f)
 except:
     sys.exit(1)
-" 2>/dev/null
+PYEOF
               
               if [ -f "wiz-results-clean.json" ] && jq empty wiz-results-clean.json 2>/dev/null; then
                 mv wiz-results-clean.json wiz-results.json
