@@ -214,19 +214,29 @@ jobs:
             -p "Code Blocking - Malware" \
             --format json \
             --file-hashes-scan \
-            --output wiz-results.json
+            --output wiz-results.json 2>/dev/null
           
           SCAN_EXIT_CODE=$?
           
           echo "scan_exit_code=${SCAN_EXIT_CODE}" >> $GITHUB_OUTPUT
           
-          # Validate JSON output
+          # Validate and clean JSON output
           if [ ! -f "wiz-results.json" ]; then
             echo "::error::Wiz scan did not produce results file"
             echo '{"result":{"analytics":{"vulnerabilities":{},"secrets":{},"malware":{}}}}' > wiz-results.json
-          elif ! jq empty wiz-results.json 2>/dev/null; then
-            echo "::warning::Wiz results file is not valid JSON, creating empty result"
-            echo '{"result":{"analytics":{"vulnerabilities":{},"secrets":{},"malware":{}}}}' > wiz-results.json
+          else
+            # Try to validate JSON, and if it fails, try to extract JSON object
+            if ! jq empty wiz-results.json 2>/dev/null; then
+              echo "::warning::Wiz results file contains non-JSON content, attempting to extract JSON"
+              # Try to extract JSON object from file (in case warnings are mixed in)
+              if jq -R -s 'gsub("^[^{]*"; "") | gsub("[^}]*$"; "") | fromjson' wiz-results.json > wiz-results-clean.json 2>/dev/null; then
+                mv wiz-results-clean.json wiz-results.json
+                echo "Successfully extracted JSON from results"
+              else
+                echo "::error::Could not extract valid JSON, creating empty result"
+                echo '{"result":{"analytics":{"vulnerabilities":{},"secrets":{},"malware":{}}}}' > wiz-results.json
+              fi
+            fi
           fi
           
           # Parse metrics
