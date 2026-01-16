@@ -227,14 +227,30 @@ jobs:
           else
             # Check if file is valid JSON
             if ! jq empty wiz-results.json 2>/dev/null; then
-              echo "::warning::Attempting to extract JSON from Wiz output"
-              # Extract just the JSON object (between first { and last })
-              sed -n '/{/,/^}$/p' wiz-results.json | jq . > wiz-results-clean.json 2>/dev/null || \
-              awk '/^\{/,/^\}$/' wiz-results.json > wiz-results-clean.json 2>/dev/null
+              echo "::warning::Wiz output file contains non-JSON content, extracting JSON object"
+              # The Wiz CLI may print warnings before/after the JSON object
+              # Extract the JSON by finding the first { and matching closing }
+              python3 -c "
+import sys, json
+content = open('wiz-results.json', 'r').read()
+# Find first { and extract from there
+start = content.find('{')
+if start == -1:
+    sys.exit(1)
+content = content[start:]
+# Parse the JSON to find the properly balanced closing }
+try:
+    decoder = json.JSONDecoder()
+    obj, idx = decoder.raw_decode(content)
+    with open('wiz-results-clean.json', 'w') as f:
+        json.dump(obj, f)
+except:
+    sys.exit(1)
+" 2>/dev/null
               
-              if [ -s wiz-results-clean.json ] && jq empty wiz-results-clean.json 2>/dev/null; then
+              if [ -f "wiz-results-clean.json" ] && jq empty wiz-results-clean.json 2>/dev/null; then
                 mv wiz-results-clean.json wiz-results.json
-                echo "Successfully extracted valid JSON"
+                echo "Successfully extracted valid JSON object"
               else
                 echo "::error::Could not extract valid JSON from Wiz output, creating empty result"
                 echo '{"result":{"analytics":{"vulnerabilities":{},"secrets":{},"malware":{}}}}' > wiz-results.json
