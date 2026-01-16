@@ -214,18 +214,24 @@ jobs:
             -p "Code Blocking - Malware" \
             --format json \
             --file-hashes-scan \
-            --output wiz-results.json
+            --output wiz-results-raw.json,json
           
           SCAN_EXIT_CODE=$?
-          
           echo "scan_exit_code=${SCAN_EXIT_CODE}" >> $GITHUB_OUTPUT
           
-          # Validate JSON output
-          if [ ! -f "wiz-results.json" ]; then
+          # Wiz CLI may append warning messages after the JSON output in the file
+          # Extract only the first line which contains the valid JSON object
+          if [ -f "wiz-results-raw.json" ]; then
+            head -1 wiz-results-raw.json > wiz-results.json
+            rm wiz-results-raw.json
+          else
             echo "::error::Wiz scan did not produce results file"
             echo '{"result":{"analytics":{"vulnerabilities":{},"secrets":{},"malware":{}}}}' > wiz-results.json
-          elif ! jq empty wiz-results.json 2>/dev/null; then
-            echo "::warning::Wiz results file is not valid JSON, creating empty result"
+          fi
+          
+          # Validate JSON
+          if ! jq empty wiz-results.json 2>/dev/null; then
+            echo "::error::Failed to parse Wiz scan results"
             echo '{"result":{"analytics":{"vulnerabilities":{},"secrets":{},"malware":{}}}}' > wiz-results.json
           fi
           
