@@ -209,9 +209,9 @@ jobs:
           set +e
           wiz docker scan \
             -i scan-target:${{ github.sha }} \
-            -p "Code Blocking - Vulnerabilities" \
-            -p "Code Blocking - Secrets" \
-            -p "Code Blocking - Malware" \
+            -p "Test - Bala: Code Blocking - Vulnerabilities" \
+            -p "Test - Bala: Code Blocking - Secrets" \
+            -p "Test - Bala: Code Blocking - Malware" \
             --format json \
             --file-hashes-scan \
             --output wiz-results-raw.json,json
