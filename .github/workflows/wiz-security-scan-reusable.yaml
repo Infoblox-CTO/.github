@@ -331,10 +331,29 @@ jobs:
             
             # Show specific HIGH/CRITICAL vulnerabilities
             if [ "${VULN_HIGH}" -gt 0 ] || [ "${VULN_CRITICAL}" -gt 0 ]; then
+              # Count fixable vs unfixable vulnerabilities
+              FIXABLE_VULNS=$(jq -r '[.result.libraries[]?.vulnerabilities[]?, .result.osPackages[]?.vulnerabilities[]?, .result.cpes[]?.vulnerabilities[]? | select(.severity == "HIGH" or .severity == "CRITICAL") | select(.fixedVersion != null)] | length' wiz-results.json 2>/dev/null)
+              UNFIXABLE_VULNS=$(jq -r '[.result.libraries[]?.vulnerabilities[]?, .result.osPackages[]?.vulnerabilities[]?, .result.cpes[]?.vulnerabilities[]? | select(.severity == "HIGH" or .severity == "CRITICAL") | select(.fixedVersion == null)] | length' wiz-results.json 2>/dev/null)
+              
               echo "#### Packages to Fix (grouped by package)" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
-              echo "| Source | Package | Version | Location | Severity | Fix Available |" >> $GITHUB_STEP_SUMMARY
-              echo "|--------|---------|---------|----------|----------|---------------|" >> $GITHUB_STEP_SUMMARY
+              echo "**Found:** ${VULN_CRITICAL} Critical + ${VULN_HIGH} High severity vulnerabilities" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              
+              if [ "${UNFIXABLE_VULNS}" -gt 0 ]; then
+                echo "> ℹ️ **Note:** ${UNFIXABLE_VULNS} vulnerability(ies) have no fix available yet and are excluded from the table below. These are tracked but won't block your workflow. See full scan results in Wiz Console for complete details." >> $GITHUB_STEP_SUMMARY
+                echo "" >> $GITHUB_STEP_SUMMARY
+              fi
+              
+              if [ "${FIXABLE_VULNS}" -gt 0 ]; then
+                echo "**Fixable vulnerabilities (${FIXABLE_VULNS}):**" >> $GITHUB_STEP_SUMMARY
+                echo "" >> $GITHUB_STEP_SUMMARY
+                echo "| Source | Package | Version | Location | Severity | Fix Available |" >> $GITHUB_STEP_SUMMARY
+                echo "|--------|---------|---------|----------|----------|---------------|" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "✅ **All ${VULN_CRITICAL} Critical + ${VULN_HIGH} High vulnerabilities are currently unfixable.** No action required at this time." >> $GITHUB_STEP_SUMMARY
+                echo "" >> $GITHUB_STEP_SUMMARY
+              fi
               
               # Extract HIGH/CRITICAL vulnerabilities from libraries
               jq -r '.result.libraries[]? | select(.vulnerabilities != null) | 
@@ -373,6 +392,9 @@ jobs:
               
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "**Recommended Action:** Fix vulnerabilities listed above." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            elif [ "${FIXABLE_VULNS}" -eq 0 ]; then
+              echo "Monitor vendor security advisories for patches. For complete vulnerability details including unfixable CVEs, view the full scan in [Wiz Console](https://app.wiz.io/findings/cicd-scans)." >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
             fi
             
