@@ -209,9 +209,14 @@ jobs:
           set +e
           wiz docker scan \
             -i scan-target:${{ github.sha }} \
-            -p "Test - Bala: Code Blocking - Vulnerabilities" \
-            -p "Test - Bala: Code Blocking - Secrets" \
-            -p "Test - Bala: Code Blocking - Malware" \
+            -p "PSE - Build: Malware - Critical - Audit/Warn - All Projects" \
+            -p "PSE - Build: Malware - High - Audit/Warn - All Projects" \
+            -p "PSE: Secrets - Critical - Audit/Warn - All Projects" \
+            -p "PSE: Secrets - High - Audit/Warn - All Projects" \
+            -p "PSE: Vulnerability - Critical - Audit/Warn - All Projects" \
+            -p "PSE: Vulnerability - End of Life - Critical - Audit/Warn - All Projects" \
+            -p "PSE: Vulnerability - End of Life - High - Audit/Warn - All Projects" \
+            -p "PSE: Vulnerability - High - Audit/Warn - All Projects" \
             --format json \
             --file-hashes-scan \
             --output wiz-results-raw.json,json
