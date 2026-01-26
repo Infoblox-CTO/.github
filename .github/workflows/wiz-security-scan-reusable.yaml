@@ -279,12 +279,12 @@ jobs:
           echo "failed_policies=${FAILED_POLICIES}" >> $GITHUB_OUTPUT
           
           # Display comprehensive summary
-          echo "## Wiz Security Scan Results (ENFORCEMENT MODE)" >> $GITHUB_STEP_SUMMARY
+          echo "## Wiz Security Scan Results (AUDIT MODE)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "> **ENFORCEMENT MODE ACTIVE** - Policy violations will BLOCK this PR from merging." >> $GITHUB_STEP_SUMMARY
+          echo "> **AUDIT MODE ACTIVE** - Security findings reported for review. Builds will not be blocked." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Image:** \`scan-target:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Policies Applied:** 3 (Vulnerabilities, Secrets, Malware)" >> $GITHUB_STEP_SUMMARY
+          echo "**Policies Applied:** 8 (PSE Audit/Warn - Vulnerabilities, EOL, Secrets, Malware by severity)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           # Policy Status Table
@@ -295,19 +295,19 @@ jobs:
           
           # Vulnerability policy threshold: HIGH+ (configured in Wiz Console)
           if [ "${VULN_HIGH}" -gt 0 ] || [ "${VULN_CRITICAL}" -gt 0 ]; then
-            echo "| Vulnerabilities (High+) | **BLOCKED** | ${VULN_TOTAL} total (${VULN_CRITICAL} Critical, ${VULN_HIGH} High, ${VULN_MEDIUM} Medium, ${VULN_LOW} Low, ${VULN_INFO} Info) |" >> $GITHUB_STEP_SUMMARY
+            echo "| Vulnerabilities (High+) | **FINDINGS DETECTED** | ${VULN_TOTAL} total (${VULN_CRITICAL} Critical, ${VULN_HIGH} High, ${VULN_MEDIUM} Medium, ${VULN_LOW} Low, ${VULN_INFO} Info) |" >> $GITHUB_STEP_SUMMARY
           else
             echo "| Vulnerabilities (High+) | PASSED | ${VULN_TOTAL} total (${VULN_MEDIUM} Medium, ${VULN_LOW} Low, ${VULN_INFO} Info) |" >> $GITHUB_STEP_SUMMARY
           fi
           
           if [ "${SECRETS_TOTAL}" -gt 0 ]; then
-            echo "| Secrets | **BLOCKED** | ${SECRETS_TOTAL} secrets found (${SECRETS_PASSWORDS} passwords, ${SECRETS_KEYS} keys, ${SECRETS_CLOUD} cloud keys) |" >> $GITHUB_STEP_SUMMARY
+            echo "| Secrets | **FINDINGS DETECTED** | ${SECRETS_TOTAL} secrets found (${SECRETS_PASSWORDS} passwords, ${SECRETS_KEYS} keys, ${SECRETS_CLOUD} cloud keys) |" >> $GITHUB_STEP_SUMMARY
           else
             echo "| Secrets | PASSED | No secrets detected |" >> $GITHUB_STEP_SUMMARY
           fi
           
           if [ "${MALWARE_TOTAL}" -gt 0 ]; then
-            echo "| Malware | **BLOCKED** | ${MALWARE_TOTAL} malware detected (${MALWARE_CRITICAL} Critical, ${MALWARE_HIGH} High) |" >> $GITHUB_STEP_SUMMARY
+            echo "| Malware | **FINDINGS DETECTED** | ${MALWARE_TOTAL} malware detected (${MALWARE_CRITICAL} Critical, ${MALWARE_HIGH} High) |" >> $GITHUB_STEP_SUMMARY
           else
             echo "| Malware | PASSED | No malware detected |" >> $GITHUB_STEP_SUMMARY
           fi
@@ -375,6 +375,30 @@ jobs:
               echo "**Recommended Action:** Fix vulnerabilities listed above." >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
             fi
+            
+            # End of Life (EOL) Vulnerabilities
+            EOL_VULNS=$(jq -r '[.result.libraries[]?.vulnerabilities[]? | select(.isEndOfLife == true and (.severity == "HIGH" or .severity == "CRITICAL"))] | length' wiz-results.json 2>/dev/null)
+            if [ "${EOL_VULNS}" -gt 0 ]; then
+              echo "#### End of Life (EOL) Vulnerabilities" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "⚠️ **${EOL_VULNS} vulnerabilities found in End-of-Life software components**" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "| Package | Version | Location | Severity | CVE |" >> $GITHUB_STEP_SUMMARY
+              echo "|---------|---------|----------|----------|-----|" >> $GITHUB_STEP_SUMMARY
+              
+              jq -r '.result.libraries[]? | select(.vulnerabilities != null) | 
+                . as $lib | 
+                .vulnerabilities[] | select(.isEndOfLife == true and (.severity == "HIGH" or .severity == "CRITICAL")) | 
+                "\($lib.name)|\($lib.version)|\($lib.path)|\(.severity)|\(.name)"' \
+                wiz-results.json 2>/dev/null | sort -u | head -20 | \
+                while IFS='|' read -r pkg_name pkg_version location severity cve; do
+                  echo "| ${pkg_name} | ${pkg_version} | \`${location}\` | ${severity} | ${cve} |" >> $GITHUB_STEP_SUMMARY
+                done
+              
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Critical Action Required:** These components are no longer maintained and will not receive security updates. Upgrade to supported versions immediately." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
           fi
           
           # Detailed Secrets Breakdown
@@ -414,25 +438,27 @@ jobs:
           # Overall Result
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [ ${SCAN_EXIT_CODE} -ne 0 ]; then
-            echo "### Build BLOCKED: Security Policy Violations" >> $GITHUB_STEP_SUMMARY
+          if [ ${SCAN_EXIT_CODE} -ne 0 ] || [ "${VULN_CRITICAL}" -gt 0 ] || [ "${VULN_HIGH}" -gt 0 ] || [ "${SECRETS_TOTAL}" -gt 0 ] || [ "${MALWARE_TOTAL}" -gt 0 ]; then
+            echo "### Security Findings Detected - Review Recommended" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Failed Policies:** ${FAILED_POLICIES}" >> $GITHUB_STEP_SUMMARY
+            if [ -n "${FAILED_POLICIES}" ] && [ "${FAILED_POLICIES}" != "" ]; then
+              echo "**Policies with Findings:** ${FAILED_POLICIES}" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "**Findings detected - Review recommended before merging.**" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**This PR cannot be merged until these issues are resolved.**" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Required Actions:**" >> $GITHUB_STEP_SUMMARY
+            echo "**Recommended Actions:**" >> $GITHUB_STEP_SUMMARY
             echo "1. Review the security findings above" >> $GITHUB_STEP_SUMMARY
-            echo "2. Fix all Critical and High severity vulnerabilities" >> $GITHUB_STEP_SUMMARY
+            echo "2. Address Critical and High severity vulnerabilities" >> $GITHUB_STEP_SUMMARY
             echo "3. Remove any detected secrets or malware" >> $GITHUB_STEP_SUMMARY
-            echo "4. Push changes and re-run this scan" >> $GITHUB_STEP_SUMMARY
+            echo "4. Consider fixing issues before deployment" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "::error::Build blocked by security policy violations: ${FAILED_POLICIES}"
+            echo "::warning::Security findings detected - Review recommended: Critical=${VULN_CRITICAL}, High=${VULN_HIGH}, Secrets=${SECRETS_TOTAL}, Malware=${MALWARE_TOTAL}"
           else
-            echo "### Build Approved: All Security Policies Passed" >> $GITHUB_STEP_SUMMARY
+            echo "### Security Scan Complete: No High-Risk Findings" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "This image meets all security requirements and is approved for deployment." >> $GITHUB_STEP_SUMMARY
-            echo "::notice::Wiz scan passed - All policies compliant"
+            echo "This image has no critical or high severity security findings." >> $GITHUB_STEP_SUMMARY
+            echo "::notice::Wiz scan complete - No high-risk findings detected"
           fi
           
       
@@ -457,26 +483,26 @@ jobs:
             const malwareTotal = process.env.MALWARE_TOTAL || '0';
             const failedPolicies = process.env.FAILED_POLICIES || 'None';
             
-            let statusText = 'All Policies Passed';
-            let alertLevel = '**This image is secure and ready for deployment.**';
+            let statusText = 'No High-Risk Findings';
+            let alertLevel = '**This image has no critical or high severity security findings.**';
             
-            if (exitCode !== '0') {
-              statusText = 'Build BLOCKED - Security Policy Violations';
-              alertLevel = '**THIS PR CANNOT BE MERGED** - Critical security issues must be fixed before merging.';
+            if (exitCode !== '0' || vulnCritical > 0 || vulnHigh > 0 || secretsTotal > 0 || malwareTotal > 0) {
+              statusText = 'Security Findings Detected - Review Recommended';
+              alertLevel = '**Review recommended** - Security findings detected. Please review before deployment.';
             }
             
-            const summary = "## Wiz Security Scan Results (ENFORCEMENT MODE)\n\n" +
-              "> **ENFORCEMENT MODE ACTIVE** - Policy violations will BLOCK this PR from merging.\n\n" +
+            const summary = "## Wiz Security Scan Results (AUDIT MODE)\n\n" +
+              "> **AUDIT MODE ACTIVE** - Security findings reported for review. Builds will not be blocked.\n\n" +
               "### Overall Status: " + statusText + "\n\n" +
               alertLevel + "\n\n" +
               "---\n\n" +
               "### Quick Summary\n\n" +
               "| Policy | Status | Count |\n" +
               "|--------|--------|-------|\n" +
-              "| Vulnerabilities | " + (vulnCritical > 0 || vulnHigh > 0 ? 'BLOCKED' : 'PASSED') + " | " + vulnTotal + " total (" + vulnCritical + " Critical, " + vulnHigh + " High) |\n" +
-              "| Secrets | " + (secretsTotal > 0 ? 'BLOCKED' : 'PASSED') + " | " + secretsTotal + " found |\n" +
-              "| Malware | " + (malwareTotal > 0 ? 'BLOCKED' : 'PASSED') + " | " + malwareTotal + " detected |\n\n" +
-              "**Failed Policies:** " + failedPolicies + "\n\n" +
+              "| Vulnerabilities | " + (vulnCritical > 0 || vulnHigh > 0 ? 'FINDINGS DETECTED' : 'PASSED') + " | " + vulnTotal + " total (" + vulnCritical + " Critical, " + vulnHigh + " High) |\n" +
+              "| Secrets | " + (secretsTotal > 0 ? 'FINDINGS DETECTED' : 'PASSED') + " | " + secretsTotal + " found |\n" +
+              "| Malware | " + (malwareTotal > 0 ? 'FINDINGS DETECTED' : 'PASSED') + " | " + malwareTotal + " detected |\n\n" +
+              "**Policies with Findings:** " + failedPolicies + "\n\n" +
               "---\n\n" +
               "### Full Details\n\n" +
               "For complete vulnerability breakdown, package-specific fixes, and remediation steps:\n" +
@@ -527,18 +553,21 @@ jobs:
           docker rmi scan-target:${{ github.sha }} || true
           docker image prune -f || true
       
-      - name: Enforce Security Policies
-        if: steps.scan.outputs.scan_exit_code != '0'
+      - name: Report Security Findings
+        if: steps.scan.outputs.scan_exit_code != '0' || steps.scan.outputs.vuln_critical != '0' || steps.scan.outputs.vuln_high != '0' || steps.scan.outputs.secrets_total != '0' || steps.scan.outputs.malware_total != '0'
         run: |
-          echo "::error::Security scan failed - Policy violations detected"
-          echo "::error::Failed policies: ${{ steps.scan.outputs.failed_policies }}"
+          echo "::warning::Security findings detected - Review recommended"
+          if [ -n "${{ steps.scan.outputs.failed_policies }}" ]; then
+            echo "::warning::Policies with findings: ${{ steps.scan.outputs.failed_policies }}"
+          fi
           echo ""
           echo "Critical/High vulnerabilities: ${{ steps.scan.outputs.vuln_critical }}/${{ steps.scan.outputs.vuln_high }}"
           echo "Secrets detected: ${{ steps.scan.outputs.secrets_total }}"
           echo "Malware detected: ${{ steps.scan.outputs.malware_total }}"
           echo ""
-          echo "This build is BLOCKED until security issues are resolved."
-          exit 1
+          echo "AUDIT MODE: Build continues. Review findings before deployment."
+          echo ""
+          echo "To enforce blocking on findings, update this step to include 'exit 1'."
       
       - name: Check Docker build status
         if: steps.build.outcome == 'failure'
