@@ -391,8 +391,6 @@ jobs:
               fi
               
               echo "" >> $GITHUB_STEP_SUMMARY
-              echo "**Recommended Action:** Fix vulnerabilities listed above." >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
             elif [ "${FIXABLE_VULNS}" -eq 0 ]; then
               echo "Monitor vendor security advisories for patches. For complete vulnerability details including unfixable CVEs, view the full scan in [Wiz Console](https://app.wiz.io/findings/cicd-scans)." >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
