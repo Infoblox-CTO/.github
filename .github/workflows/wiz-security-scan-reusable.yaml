@@ -455,6 +455,83 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
           fi
           
+          # Ignored Findings Section
+          IGNORED_BY_RULE=$(jq -r '[.result.libraries[]?.vulnerabilities[]?, .result.osPackages[]?.vulnerabilities[]?, .result.cpes[]?.vulnerabilities[]?, .result.endOfLifeTechnologies[]?.vulnerabilities[]?] | map(select(.ignoredPolicyMatches != null)) | map(.ignoredPolicyMatches[] | select(.ignoreReason == "IGNORE_RULE")) | length' wiz-results.json 2>/dev/null || echo "0")
+          IGNORED_BELOW_THRESHOLD=$(jq -r '[.result.libraries[]?.vulnerabilities[]?, .result.osPackages[]?.vulnerabilities[]?, .result.cpes[]?.vulnerabilities[]?, .result.endOfLifeTechnologies[]?.vulnerabilities[]?] | map(select(.ignoredPolicyMatches != null)) | map(.ignoredPolicyMatches[] | select(.ignoreReason == "BELOW_THRESHOLD")) | length' wiz-results.json 2>/dev/null || echo "0")
+          
+          TOTAL_IGNORED=$((IGNORED_BY_RULE + IGNORED_BELOW_THRESHOLD))
+          
+          if [ "${TOTAL_IGNORED}" -gt 0 ]; then
+            echo "### Ignored Findings" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Total Ignored:** ${TOTAL_IGNORED} findings (${IGNORED_BY_RULE} by ignore rules, ${IGNORED_BELOW_THRESHOLD} below policy threshold)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            # Show findings ignored by explicit rules
+            if [ "${IGNORED_BY_RULE}" -gt 0 ]; then
+              echo "#### Findings Ignored by Rules (${IGNORED_BY_RULE})" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "These findings match configured ignore rules and are excluded from policy evaluation:" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "| Package | Version | CVE | Severity | Policy | Ignore Rule |" >> $GITHUB_STEP_SUMMARY
+              echo "|---------|---------|-----|----------|--------|-------------|" >> $GITHUB_STEP_SUMMARY
+              
+              # Extract library vulnerabilities ignored by rules
+              jq -r '.result.libraries[]? | select(.vulnerabilities != null) | . as $lib | .vulnerabilities[] | select(.ignoredPolicyMatches != null) | . as $vuln | .ignoredPolicyMatches[] | select(.ignoreReason == "IGNORE_RULE") | select(.matchedIgnoreRules != null) | "\($lib.name)|\($lib.version)|\($vuln.name)|\($vuln.severity)|\(.policy.name)|\(.matchedIgnoreRules[0].name // "N/A")"' wiz-results.json 2>/dev/null | sort -u | \
+                while IFS='|' read -r pkg_name pkg_version cve severity policy rule; do
+                  echo "| ${pkg_name} | ${pkg_version} | ${cve} | ${severity} | ${policy} | ${rule} |" >> $GITHUB_STEP_SUMMARY
+                done
+              
+              # Extract OS package vulnerabilities ignored by rules
+              jq -r '.result.osPackages[]? | select(.vulnerabilities != null) | . as $pkg | .vulnerabilities[] | select(.ignoredPolicyMatches != null) | . as $vuln | .ignoredPolicyMatches[] | select(.ignoreReason == "IGNORE_RULE") | select(.matchedIgnoreRules != null) | "\($pkg.name)|\($pkg.version)|\($vuln.name)|\($vuln.severity)|\(.policy.name)|\(.matchedIgnoreRules[0].name // "N/A")"' wiz-results.json 2>/dev/null | sort -u | \
+                while IFS='|' read -r pkg_name pkg_version cve severity policy rule; do
+                  echo "| ${pkg_name} | ${pkg_version} | ${cve} | ${severity} | ${policy} | ${rule} |" >> $GITHUB_STEP_SUMMARY
+                done
+              
+              # Extract EOL technology vulnerabilities ignored by rules
+              jq -r '.result.endOfLifeTechnologies[]? | select(.vulnerabilities != null) | . as $tech | .vulnerabilities[] | select(.ignoredPolicyMatches != null) | . as $vuln | .ignoredPolicyMatches[] | select(.ignoreReason == "IGNORE_RULE") | select(.matchedIgnoreRules != null) | "\($tech.name)|\($tech.version)|\($vuln.name)|\($vuln.severity)|\(.policy.name)|\(.matchedIgnoreRules[0].name // "N/A")"' wiz-results.json 2>/dev/null | sort -u | \
+                while IFS='|' read -r tech_name tech_version vuln severity policy rule; do
+                  echo "| ${tech_name} (EOL) | ${tech_version} | ${vuln} | ${severity} | ${policy} | ${rule} |" >> $GITHUB_STEP_SUMMARY
+                done
+              
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "> 💡 **Note:** These findings are ignored based on configured exception rules in Wiz Console. They do not count toward policy thresholds." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            # Show findings below threshold
+            if [ "${IGNORED_BELOW_THRESHOLD}" -gt 0 ]; then
+              echo "#### Findings Below Policy Threshold (${IGNORED_BELOW_THRESHOLD})" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "These findings exist but are below the configured policy thresholds:" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "| Package | Version | CVE | Severity | Policy |" >> $GITHUB_STEP_SUMMARY
+              echo "|---------|---------|-----|----------|--------|" >> $GITHUB_STEP_SUMMARY
+              
+              # Extract library vulnerabilities below threshold
+              jq -r '.result.libraries[]? | select(.vulnerabilities != null) | . as $lib | .vulnerabilities[] | select(.ignoredPolicyMatches != null) | . as $vuln | .ignoredPolicyMatches[] | select(.ignoreReason == "BELOW_THRESHOLD") | "\($lib.name)|\($lib.version)|\($vuln.name)|\($vuln.severity)|\(.policy.name)"' wiz-results.json 2>/dev/null | sort -u | \
+                while IFS='|' read -r pkg_name pkg_version cve severity policy; do
+                  echo "| ${pkg_name} | ${pkg_version} | ${cve} | ${severity} | ${policy} |" >> $GITHUB_STEP_SUMMARY
+                done
+              
+              # Extract OS package vulnerabilities below threshold
+              jq -r '.result.osPackages[]? | select(.vulnerabilities != null) | . as $pkg | .vulnerabilities[] | select(.ignoredPolicyMatches != null) | . as $vuln | .ignoredPolicyMatches[] | select(.ignoreReason == "BELOW_THRESHOLD") | "\($pkg.name)|\($pkg.version)|\($vuln.name)|\($vuln.severity)|\(.policy.name)"' wiz-results.json 2>/dev/null | sort -u | \
+                while IFS='|' read -r pkg_name pkg_version cve severity policy; do
+                  echo "| ${pkg_name} | ${pkg_version} | ${cve} | ${severity} | ${policy} |" >> $GITHUB_STEP_SUMMARY
+                done
+              
+              # Extract EOL technology vulnerabilities below threshold
+              jq -r '.result.endOfLifeTechnologies[]? | select(.vulnerabilities != null) | . as $tech | .vulnerabilities[] | select(.ignoredPolicyMatches != null) | . as $vuln | .ignoredPolicyMatches[] | select(.ignoreReason == "BELOW_THRESHOLD") | "\($tech.name)|\($tech.version)|\($vuln.name)|\($vuln.severity)|\(.policy.name)"' wiz-results.json 2>/dev/null | sort -u | \
+                while IFS='|' read -r tech_name tech_version vuln severity policy; do
+                  echo "| ${tech_name} (EOL) | ${tech_version} | ${vuln} | ${severity} | ${policy} |" >> $GITHUB_STEP_SUMMARY
+                done
+              
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "> 💡 **Note:** These findings are tracked but do not cause policy failures as they are below the configured count thresholds." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+          
           # Overall Result
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
