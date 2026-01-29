@@ -278,11 +278,21 @@ jobs:
           
           echo "failed_policies=${FAILED_POLICIES}" >> $GITHUB_OUTPUT
           
+          # Extract Wiz Console report URL
+          WIZ_REPORT_URL=$(jq -r '.reportUrl // ""' wiz-results.json)
+          
           # Display comprehensive summary
           echo "## Wiz Security Scan Results (AUDIT MODE)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "> **AUDIT MODE ACTIVE** - Security findings reported for review. Builds will not be blocked." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Add link to Wiz Console report if available
+          if [ -n "${WIZ_REPORT_URL}" ]; then
+            echo "📊 **[View Full Report in Wiz Console](${WIZ_REPORT_URL})**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
           echo "**Image:** \`scan-target:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Policies Applied:** 8 (PSE Audit/Warn - Vulnerabilities, EOL, Secrets, Malware by severity)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
