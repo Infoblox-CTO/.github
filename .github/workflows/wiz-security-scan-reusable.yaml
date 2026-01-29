@@ -460,10 +460,6 @@ jobs:
           #!/bin/bash
           WIZ_FILE="$1"
           
-          count_ignored() {
-            jq -r "[.result.libraries[]?.vulnerabilities[]?, .result.osPackages[]?.vulnerabilities[]?, .result.endOfLifeTechnologies[]?.vulnerabilities[]?] | map(select(.ignoredPolicyMatches != null)) | map(.ignoredPolicyMatches[] | select(.ignoreReason == \"$1\")) | length" "$WIZ_FILE" 2>/dev/null || echo "0"
-          }
-          
           extract_lib_ignored() {
             jq -r ".result.libraries[]? | select(.vulnerabilities != null) | . as \$lib | .vulnerabilities[] | select(.ignoredPolicyMatches != null) | . as \$vuln | .ignoredPolicyMatches[] | select(.ignoreReason == \"$1\") | \"\(\$lib.name)|\(\$lib.version)|\(\$vuln.name)|\(\$vuln.severity)|\(.policy.name)|\" + (if \"$1\" == \"IGNORE_RULE\" then (.matchedIgnoreRules[0].name // \"N/A\") else \"\" end)" "$WIZ_FILE" 2>/dev/null | sort -u
           }
@@ -472,18 +468,21 @@ jobs:
             jq -r ".result.endOfLifeTechnologies[]? | select(.vulnerabilities != null) | . as \$tech | .vulnerabilities[] | select(.ignoredPolicyMatches != null) | . as \$vuln | .ignoredPolicyMatches[] | select(.ignoreReason == \"$1\") | \"\(\$tech.name) (EOL)|\(\$tech.version)|\(\$vuln.name)|\(\$vuln.severity)|\(.policy.name)|\" + (if \"$1\" == \"IGNORE_RULE\" then (.matchedIgnoreRules[0].name // \"N/A\") else \"\" end)" "$WIZ_FILE" 2>/dev/null | sort -u
           }
           
-          IGNORED_BY_RULE=$(count_ignored "IGNORE_RULE")
-          IGNORED_BELOW=$(count_ignored "BELOW_THRESHOLD")
-          TOTAL=$((IGNORED_BY_RULE + IGNORED_BELOW))
+          # Check if there are any ignored findings
+          HAS_IGNORE_RULES=$(extract_lib_ignored "IGNORE_RULE" | wc -l)
+          HAS_IGNORE_EOL=$(extract_eol_ignored "IGNORE_RULE" | wc -l)
+          HAS_BELOW_RULES=$(extract_lib_ignored "BELOW_THRESHOLD" | wc -l)
+          HAS_BELOW_EOL=$(extract_eol_ignored "BELOW_THRESHOLD" | wc -l)
           
-          if [ "$TOTAL" -gt 0 ]; then
+          TOTAL_HAS_IGNORE=$((HAS_IGNORE_RULES + HAS_IGNORE_EOL))
+          TOTAL_HAS_BELOW=$((HAS_BELOW_RULES + HAS_BELOW_EOL))
+          
+          if [ "$TOTAL_HAS_IGNORE" -gt 0 ] || [ "$TOTAL_HAS_BELOW" -gt 0 ]; then
             echo "### Ignored Findings"
             echo ""
-            echo "**Total Ignored:** $TOTAL findings ($IGNORED_BY_RULE by ignore rules, $IGNORED_BELOW below policy threshold)"
-            echo ""
             
-            if [ "$IGNORED_BY_RULE" -gt 0 ]; then
-              echo "#### Findings Ignored by Rules ($IGNORED_BY_RULE)"
+            if [ "$TOTAL_HAS_IGNORE" -gt 0 ]; then
+              echo "#### Findings Ignored by Rules"
               echo ""
               echo "These findings match configured ignore rules and are excluded from policy evaluation:"
               echo ""
@@ -496,8 +495,8 @@ jobs:
               echo ""
             fi
             
-            if [ "$IGNORED_BELOW" -gt 0 ]; then
-              echo "#### Findings Below Policy Threshold ($IGNORED_BELOW)"
+            if [ "$TOTAL_HAS_BELOW" -gt 0 ]; then
+              echo "#### Findings Below Policy Threshold"
               echo ""
               echo "These findings exist but are below the configured policy thresholds:"
               echo ""
