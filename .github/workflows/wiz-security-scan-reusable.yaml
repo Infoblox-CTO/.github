@@ -3,6 +3,16 @@ name: Reusable Wiz Security Scan
 on:
   workflow_call:
     inputs:
+      build-command:
+        description: 'Command to build artifacts before Docker build (e.g., "make build", "go build -o bin/app ./cmd/app")'
+        required: false
+        type: string
+        default: ''
+      go-version-file:
+        description: 'Path to go.mod or go.work file for Go version detection (default: go.mod)'
+        required: false
+        type: string
+        default: 'go.mod'
       dockerfile-path:
         description: 'Path to Dockerfile relative to repo root (e.g., docker/Dockerfile, Dockerfile, build/Dockerfile)'
         required: false
@@ -81,6 +91,20 @@ jobs:
       - name: Configure Git for private repos
         run: |
           git config --global url."https://${{ secrets.GITPAT }}@github.com/".insteadOf "https://github.com/"
+      
+      - name: Set up Go
+        if: inputs.build-command != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+      
+      - name: Run build command
+        if: inputs.build-command != ''
+        run: |
+          echo "Running build command: ${{ inputs.build-command }}"
+          ${{ inputs.build-command }}
+          echo "Build completed successfully"
       
       - name: Auto-detect and regenerate vendor directory
         run: |
