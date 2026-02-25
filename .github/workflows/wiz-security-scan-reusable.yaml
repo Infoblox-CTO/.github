@@ -33,6 +33,11 @@ on:
         required: false
         type: number
         default: 15
+      wiz-project-uuid:
+        description: 'Wiz project UUID to scope scan results (e.g., for team/compliance segmentation). If omitted, defaults to service account associated projects'
+        required: false
+        type: string
+        default: ''
     secrets:
       GITPAT:
         required: true
@@ -207,19 +212,34 @@ jobs:
         timeout-minutes: ${{ inputs.scan-timeout-minutes }}
         run: |
           set +e
-          wiz docker scan \
-            -i scan-target:${{ github.sha }} \
-            -p "PSE - Build: Malware - Critical - Audit/Warn - All Projects" \
-            -p "PSE - Build: Malware - High - Audit/Warn - All Projects" \
-            -p "PSE: Secrets - Critical - Audit/Warn - All Projects" \
-            -p "PSE: Secrets - High - Audit/Warn - All Projects" \
-            -p "PSE: Vulnerability - Critical - Audit/Warn - All Projects" \
-            -p "PSE: Vulnerability - End of Life - Critical - Audit/Warn - All Projects" \
-            -p "PSE: Vulnerability - End of Life - High - Audit/Warn - All Projects" \
-            -p "PSE: Vulnerability - High - Audit/Warn - All Projects" \
+          
+          # Build scan command with optional project scoping
+          SCAN_CMD="wiz docker scan -i scan-target:${{ github.sha }}"
+          
+          # Add project UUID if provided
+          if [ -n "${{ inputs.wiz-project-uuid }}" ]; then
+            SCAN_CMD="$SCAN_CMD --project ${{ inputs.wiz-project-uuid }}"
+            echo "Scoping scan to Wiz project: ${{ inputs.wiz-project-uuid }}"
+          else
+            echo "Using service account's default projects"
+          fi
+          
+          # Add policies
+          SCAN_CMD="$SCAN_CMD \
+            -p \"PSE - Build: Malware - Critical - Audit/Warn - All Projects\" \
+            -p \"PSE - Build: Malware - High - Audit/Warn - All Projects\" \
+            -p \"PSE: Secrets - Critical - Audit/Warn - All Projects\" \
+            -p \"PSE: Secrets - High - Audit/Warn - All Projects\" \
+            -p \"PSE: Vulnerability - Critical - Audit/Warn - All Projects\" \
+            -p \"PSE: Vulnerability - End of Life - Critical - Audit/Warn - All Projects\" \
+            -p \"PSE: Vulnerability - End of Life - High - Audit/Warn - All Projects\" \
+            -p \"PSE: Vulnerability - High - Audit/Warn - All Projects\" \
             --format json \
             --file-hashes-scan \
-            --output wiz-results-raw.json,json
+            --output wiz-results-raw.json,json"
+          
+          echo "Executing Wiz scan..."
+          eval "$SCAN_CMD"
           
           SCAN_EXIT_CODE=$?
           echo "scan_exit_code=${SCAN_EXIT_CODE}" >> $GITHUB_OUTPUT
