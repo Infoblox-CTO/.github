@@ -198,14 +198,14 @@ jobs:
       - name: Install Wiz CLI
         run: |
           echo "Downloading Wiz CLI..."
-          curl -o wizcli https://downloads.wiz.io/wizcli/latest/wizcli-linux-amd64
+          curl -o wizcli https://downloads.wiz.io/v1/wizcli/latest/wizcli-linux-amd64
           chmod +x wizcli
-          sudo mv wizcli /usr/local/bin/wiz
-          wiz version
+          sudo mv wizcli /usr/local/bin/wizcli
+          wizcli version
       
       - name: Authenticate with Wiz
         run: |
-          wiz auth --id "${{ secrets.WIZ_CLIENT_ID }}" --secret "${{ secrets.WIZ_CLIENT_SECRET }}"
+          wizcli auth --id "${{ secrets.WIZ_CLIENT_ID }}" --secret "${{ secrets.WIZ_CLIENT_SECRET }}" --assist-migration
       
       - name: Wiz CLI Security Scan
         id: scan
@@ -214,29 +214,20 @@ jobs:
           set +e
           
           # Build scan command with optional project scoping
-          SCAN_CMD="wiz docker scan -i scan-target:${{ github.sha }}"
+          SCAN_CMD="wizcli scan container-image scan-target:${{ github.sha }} --assist-migration --by-policy-hits AUDIT"
           
           # Add project UUID if provided
           if [ -n "${{ inputs.wiz-project-uuid }}" ]; then
-            SCAN_CMD="$SCAN_CMD --project ${{ inputs.wiz-project-uuid }}"
+            SCAN_CMD="$SCAN_CMD --projects ${{ inputs.wiz-project-uuid }}"
             echo "Scoping scan to Wiz project: ${{ inputs.wiz-project-uuid }}"
           else
             echo "Using service account's default projects"
           fi
           
-          # Add policies
+          # Add policies (v1.x uses comma-separated list)
           SCAN_CMD="$SCAN_CMD \
-            -p \"PSE - Build: Malware - Critical - Audit/Warn - All Projects\" \
-            -p \"PSE - Build: Malware - High - Audit/Warn - All Projects\" \
-            -p \"PSE: Secrets - Critical - Audit/Warn - All Projects\" \
-            -p \"PSE: Secrets - High - Audit/Warn - All Projects\" \
-            -p \"PSE: Vulnerability - Critical - Audit/Warn - All Projects\" \
-            -p \"PSE: Vulnerability - End of Life - Critical - Audit/Warn - All Projects\" \
-            -p \"PSE: Vulnerability - End of Life - High - Audit/Warn - All Projects\" \
-            -p \"PSE: Vulnerability - High - Audit/Warn - All Projects\" \
-            --format json \
-            --file-hashes-scan \
-            --output wiz-results-raw.json,json"
+            -p \"PSE - Build: Malware - Critical - Audit/Warn - All Projects,PSE - Build: Malware - High - Audit/Warn - All Projects,PSE: Secrets - Critical - Audit/Warn - All Projects,PSE: Secrets - High - Audit/Warn - All Projects,PSE: Vulnerability - Critical - Audit/Warn - All Projects,PSE: Vulnerability - End of Life - Critical - Audit/Warn - All Projects,PSE: Vulnerability - End of Life - High - Audit/Warn - All Projects,PSE: Vulnerability - High - Audit/Warn - All Projects\" \
+            --json-output-file wiz-results.json"
           
           echo "Executing Wiz scan..."
           eval "$SCAN_CMD"
@@ -244,12 +235,8 @@ jobs:
           SCAN_EXIT_CODE=$?
           echo "scan_exit_code=${SCAN_EXIT_CODE}" >> $GITHUB_OUTPUT
           
-          # Wiz CLI may append warning messages after the JSON output in the file
-          # Extract only the first line which contains the valid JSON object
-          if [ -f "wiz-results-raw.json" ]; then
-            head -1 wiz-results-raw.json > wiz-results.json
-            rm wiz-results-raw.json
-          else
+          # Verify scan produced results
+          if [ ! -f "wiz-results.json" ]; then
             echo "::error::Wiz scan did not produce results file"
             echo '{"result":{"analytics":{"vulnerabilities":{},"secrets":{},"malware":{}}}}' > wiz-results.json
           fi
