@@ -205,7 +205,7 @@ jobs:
       
       - name: Authenticate with Wiz
         run: |
-          wizcli auth --id "${{ secrets.WIZ_CLIENT_ID }}" --secret "${{ secrets.WIZ_CLIENT_SECRET }}" --assist-migration
+          wizcli auth --id "${{ secrets.WIZ_CLIENT_ID }}" --secret "${{ secrets.WIZ_CLIENT_SECRET }}"
       
       - name: Wiz CLI Security Scan
         id: scan
