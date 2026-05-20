@@ -115,6 +115,10 @@ jobs:
           echo "Disk space after cleanup:"
           df -h /
       
+      # NOTE: Auto-detect (elif vendor/ + go.mod) was removed because it forced
+      # 'go mod tidy && go mod vendor' on every Go repo with committed vendor/,
+      # breaking builds where GITPAT lacks access to all private dependencies.
+      # Repos needing vendor regen should explicitly pass enable-vendor-regen: true.
       - name: Auto-detect and regenerate vendor directory
         run: |
           VENDOR_REGEN_NEEDED=false
@@ -123,10 +127,8 @@ jobs:
           if [ "${{ inputs.enable-vendor-regen }}" = "true" ]; then
             VENDOR_REGEN_NEEDED=true
             echo "Vendor regeneration explicitly enabled via input"
-          # Auto-detect if vendor directory exists and might be stale
-          elif [ -d "vendor" ] && [ -f "go.mod" ]; then
-            VENDOR_REGEN_NEEDED=true
-            echo "Detected vendor/ directory - will regenerate to ensure compatibility"
+          else
+            echo "Vendor regeneration not requested — using existing vendor/ as-is"
           fi
           
           if [ "$VENDOR_REGEN_NEEDED" = "true" ]; then
