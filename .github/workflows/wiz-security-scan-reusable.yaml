@@ -38,6 +38,21 @@ on:
         required: false
         type: string
         default: ''
+      enable-gitpat-build-arg:
+        description: 'Pass GITPAT as a Docker build argument (GITHUB_PAT) for Dockerfiles that clone private repos during build'
+        required: false
+        type: boolean
+        default: false
+      pre-build-command:
+        description: 'Shell command to run before Docker build (e.g., "make download" to generate build artifacts needed by Dockerfile)'
+        required: false
+        type: string
+        default: ''
+      enable-disk-cleanup:
+        description: 'Free disk space before scan by removing unused SDKs (.NET, Android, etc.). Enable for large images (>2GB) that cause "no space left on device" errors.'
+        required: false
+        type: boolean
+        default: false
     secrets:
       GITPAT:
         required: true
@@ -87,6 +102,23 @@ jobs:
         run: |
           git config --global url."https://${{ secrets.GITPAT }}@github.com/".insteadOf "https://github.com/"
       
+      - name: Free disk space
+        if: ${{ inputs.enable-disk-cleanup }}
+        run: |
+          echo "Freeing disk space for large image scanning..."
+          df -h /
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghcrunner || true
+          sudo rm -rf /opt/hostedtoolcache || true
+          sudo docker system prune -af || true
+          echo "Disk space after cleanup:"
+          df -h /
+      
+      # NOTE: Auto-detect (elif vendor/ + go.mod) was removed because it forced
+      # 'go mod tidy && go mod vendor' on every Go repo with committed vendor/,
+      # breaking builds where GITPAT lacks access to all private dependencies.
+      # Repos needing vendor regen should explicitly pass enable-vendor-regen: true.
       - name: Auto-detect and regenerate vendor directory
         run: |
           VENDOR_REGEN_NEEDED=false
@@ -95,10 +127,8 @@ jobs:
           if [ "${{ inputs.enable-vendor-regen }}" = "true" ]; then
             VENDOR_REGEN_NEEDED=true
             echo "Vendor regeneration explicitly enabled via input"
-          # Auto-detect if vendor directory exists and might be stale
-          elif [ -d "vendor" ] && [ -f "go.mod" ]; then
-            VENDOR_REGEN_NEEDED=true
-            echo "Detected vendor/ directory - will regenerate to ensure compatibility"
+          else
+            echo "Vendor regeneration not requested — using existing vendor/ as-is"
           fi
           
           if [ "$VENDOR_REGEN_NEEDED" = "true" ]; then
@@ -110,6 +140,13 @@ jobs:
           else
             echo "No vendor regeneration needed"
           fi
+      
+      - name: Run pre-build command
+        if: ${{ inputs.pre-build-command != '' }}
+        run: |
+          echo "Running pre-build command: ${{ inputs.pre-build-command }}"
+          ${{ inputs.pre-build-command }}
+          echo "Pre-build command completed successfully"
       
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -162,6 +199,12 @@ jobs:
                 echo "  --build-arg $line"
               fi
             done <<< "${{ inputs.docker-build-args }}"
+          fi
+          
+          # Add GITPAT as GITHUB_PAT build arg if enabled
+          if [ "${{ inputs.enable-gitpat-build-arg }}" = "true" ]; then
+            echo "Adding GITHUB_PAT build argument from GITPAT secret..."
+            BUILD_CMD="$BUILD_CMD --build-arg GITHUB_PAT=${{ secrets.GITPAT }}"
           fi
           
           # Add build secrets if provided
