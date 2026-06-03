@@ -106,13 +106,13 @@ jobs:
             if [ "${IAC_HIGH}" -gt 0 ]; then
               echo "**${IAC_HIGH} High/Critical misconfiguration(s) found** (${IAC_FINDINGS} total findings)" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
-              echo "| # | Rule | Path | Severity |" >> $GITHUB_STEP_SUMMARY
-              echo "|---|------|------|----------|" >> $GITHUB_STEP_SUMMARY
+              echo "| Rule | Location | Severity |" >> $GITHUB_STEP_SUMMARY
+              echo "|------|----------|----------|" >> $GITHUB_STEP_SUMMARY
 
               jq -r '.result.iacFindings[]? | select(.severity == "HIGH" or .severity == "CRITICAL") | "\(.ruleName)|\(.filePath):\(.lineNumber // "")|\(.severity)"' iac-results.json 2>/dev/null | \
                 sort -t'|' -k3 -r | \
-                nl -w1 -s'|' | while IFS='|' read -r num rule path severity; do
-                  echo "| ${num} | ${rule} | \`${path}\` | ${severity} |" >> $GITHUB_STEP_SUMMARY
+                while IFS='|' read -r rule location severity; do
+                  echo "| ${rule} | \`${location}\` | ${severity} |" >> $GITHUB_STEP_SUMMARY
                 done
               echo "" >> $GITHUB_STEP_SUMMARY
             elif [ "${IAC_FINDINGS}" -gt 0 ]; then
@@ -149,13 +149,13 @@ jobs:
               SHOW_VULNS=$(jq -r '[.result.libraries[]?.vulnerabilities[]? | select(.severity == "CRITICAL" or .severity == "HIGH" or .severity == "MEDIUM")] | length' dir-results.json 2>/dev/null || echo "0")
 
               if [ "${SHOW_VULNS}" -gt 0 ]; then
-                echo "| # | Package | CVE | Severity | Version | Fix Version | Path |" >> $GITHUB_STEP_SUMMARY
-                echo "|---|---------|-----|----------|---------|-------------|------|" >> $GITHUB_STEP_SUMMARY
+                echo "| Package | Version | Location | CVE | Severity | Fix Available |" >> $GITHUB_STEP_SUMMARY
+                echo "|---------|---------|----------|-----|----------|---------------|" >> $GITHUB_STEP_SUMMARY
 
-                jq -r '.result.libraries[]? | select(.vulnerabilities != null) | . as $lib | .vulnerabilities[]? | select(.severity == "CRITICAL" or .severity == "HIGH" or .severity == "MEDIUM") | "\($lib.name)|\(.name)|\(.severity)|\($lib.version)|\(.fixedVersion // "No fix available")|\($lib.path // "/go.mod")"' dir-results.json 2>/dev/null | \
-                  sort -t'|' -k3r | \
-                  nl -w1 -s'|' | while IFS='|' read -r num pkg cve severity version fix path; do
-                    echo "| ${num} | ${pkg} | ${cve} | ${severity} | ${version} | ${fix} | \`${path}\` |" >> $GITHUB_STEP_SUMMARY
+                jq -r '.result.libraries[]? | select(.vulnerabilities != null) | . as $lib | .vulnerabilities[]? | select(.severity == "CRITICAL" or .severity == "HIGH" or .severity == "MEDIUM") | "\($lib.name)|\($lib.version)|\($lib.path // "/go.mod")|\(.name)|\(.severity)|\(.fixedVersion // "No fix available")"' dir-results.json 2>/dev/null | \
+                  sort -t'|' -k5r | \
+                  while IFS='|' read -r pkg version location cve severity fix; do
+                    echo "| ${pkg} | ${version} | \`${location}\` | ${cve} | ${severity} | ${fix} |" >> $GITHUB_STEP_SUMMARY
                   done
 
                 echo "" >> $GITHUB_STEP_SUMMARY
@@ -180,11 +180,11 @@ jobs:
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "**${DIR_SECRETS} secret(s) detected in source files.**" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
-              echo "| # | Type | Path | Description |" >> $GITHUB_STEP_SUMMARY
-              echo "|---|------|------|-------------|" >> $GITHUB_STEP_SUMMARY
+              echo "| Type | Location | Description |" >> $GITHUB_STEP_SUMMARY
+              echo "|------|----------|-------------|" >> $GITHUB_STEP_SUMMARY
               jq -r '.result.secrets[]? | "\(.type // "Unknown")|\(.path // "N/A")|\(.description // "Secret detected")"' dir-results.json 2>/dev/null | \
-                nl -w1 -s'|' | while IFS='|' read -r num type path desc; do
-                  echo "| ${num} | ${type} | \`${path}\` | ${desc} |" >> $GITHUB_STEP_SUMMARY
+                while IFS='|' read -r type location desc; do
+                  echo "| ${type} | \`${location}\` | ${desc} |" >> $GITHUB_STEP_SUMMARY
                 done
               echo "" >> $GITHUB_STEP_SUMMARY
             fi
