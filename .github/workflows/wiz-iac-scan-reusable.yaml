@@ -1,0 +1,194 @@
+name: Reusable Wiz IaC & Directory Scan
+
+on:
+  workflow_call:
+    inputs:
+      scan-path:
+        description: 'Path to scan relative to repo root (default: repository root)'
+        required: false
+        type: string
+        default: '.'
+      iac-types:
+        description: 'IaC types to scan (comma-separated: Dockerfile,Kubernetes,Helm,Terraform)'
+        required: false
+        type: string
+        default: 'Dockerfile,Kubernetes'
+      scan-timeout-minutes:
+        description: 'Timeout for Wiz scans in minutes'
+        required: false
+        type: number
+        default: 10
+    secrets:
+      WIZ_CLIENT_ID:
+        required: true
+        description: 'Wiz service account client ID'
+      WIZ_CLIENT_SECRET:
+        required: true
+        description: 'Wiz service account client secret'
+
+jobs:
+  iac-dir-scan:
+    name: Wiz IaC & Directory Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Wiz CLI
+        run: |
+          curl -o wizcli https://downloads.wiz.io/v1/wizcli/latest/wizcli-linux-amd64
+          chmod +x wizcli
+          sudo mv wizcli /usr/local/bin/wizcli
+          wizcli version
+
+      - name: Authenticate with Wiz
+        run: |
+          wizcli auth --id "${{ secrets.WIZ_CLIENT_ID }}" --secret "${{ secrets.WIZ_CLIENT_SECRET }}"
+
+      - name: IaC Scan (Dockerfile, Helm, Kubernetes manifests)
+        id: iac-scan
+        continue-on-error: true
+        timeout-minutes: ${{ inputs.scan-timeout-minutes }}
+        run: |
+          wizcli iac scan \
+            --path ${{ inputs.scan-path }} \
+            --types ${{ inputs.iac-types }} \
+            --format human \
+            --output iac-results.json,json
+
+      - name: Directory Scan (libraries, secrets, sensitive data)
+        id: dir-scan
+        continue-on-error: true
+        timeout-minutes: ${{ inputs.scan-timeout-minutes }}
+        run: |
+          wizcli dir scan \
+            --path ${{ inputs.scan-path }} \
+            --secrets \
+            --format human \
+            --output dir-results.json,json
+
+      - name: Upload IaC scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wiz-iac-scan-results-${{ github.sha }}
+          path: iac-results.json
+          retention-days: 90
+
+      - name: Upload directory scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wiz-dir-scan-results-${{ github.sha }}
+          path: dir-results.json
+          retention-days: 90
+
+      - name: Scan Summary
+        if: always()
+        run: |
+          echo "## IaC & Directory Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # ═══════════════════════════════════════════════════════════
+          # IaC Scan — Dockerfile/Helm/K8s Misconfigurations
+          # ═══════════════════════════════════════════════════════════
+          echo "### IaC Scan (Dockerfile, Helm, Kubernetes Misconfigurations)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f "iac-results.json" ] && jq empty iac-results.json 2>/dev/null; then
+            IAC_FINDINGS=$(jq -r '[.result.iacFindings[]?] | length' iac-results.json 2>/dev/null || echo "0")
+            IAC_HIGH=$(jq -r '[.result.iacFindings[]? | select(.severity == "HIGH" or .severity == "CRITICAL")] | length' iac-results.json 2>/dev/null || echo "0")
+
+            if [ "${IAC_HIGH}" -gt 0 ]; then
+              echo "**${IAC_HIGH} High/Critical misconfiguration(s) found** (${IAC_FINDINGS} total findings)" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "| # | Rule | Path | Severity |" >> $GITHUB_STEP_SUMMARY
+              echo "|---|------|------|----------|" >> $GITHUB_STEP_SUMMARY
+
+              jq -r '.result.iacFindings[]? | select(.severity == "HIGH" or .severity == "CRITICAL") | "\(.ruleName)|\(.filePath):\(.lineNumber // "")|\(.severity)"' iac-results.json 2>/dev/null | \
+                sort -t'|' -k3 -r | \
+                nl -w1 -s'|' | while IFS='|' read -r num rule path severity; do
+                  echo "| ${num} | ${rule} | \`${path}\` | ${severity} |" >> $GITHUB_STEP_SUMMARY
+                done
+              echo "" >> $GITHUB_STEP_SUMMARY
+            elif [ "${IAC_FINDINGS}" -gt 0 ]; then
+              echo "✅ ${IAC_FINDINGS} finding(s) detected — all below HIGH severity threshold." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "✅ No misconfigurations found." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "⚠️ IaC scan results not available (JSON missing or invalid)." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # ═══════════════════════════════════════════════════════════
+          # Directory Scan — Source-Level Library Vulnerabilities
+          # ═══════════════════════════════════════════════════════════
+          echo "### Directory Scan (Source-Level Library Vulnerabilities)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f "dir-results.json" ] && jq empty dir-results.json 2>/dev/null; then
+            DIR_VULN_TOTAL=$(jq -r '[.result.libraries[]?.vulnerabilities[]?] | length' dir-results.json 2>/dev/null || echo "0")
+
+            if [ "${DIR_VULN_TOTAL}" -gt 0 ]; then
+              DIR_CRITICAL=$(jq -r '[.result.libraries[]?.vulnerabilities[]? | select(.severity == "CRITICAL")] | length' dir-results.json 2>/dev/null || echo "0")
+              DIR_HIGH=$(jq -r '[.result.libraries[]?.vulnerabilities[]? | select(.severity == "HIGH")] | length' dir-results.json 2>/dev/null || echo "0")
+              DIR_MEDIUM=$(jq -r '[.result.libraries[]?.vulnerabilities[]? | select(.severity == "MEDIUM")] | length' dir-results.json 2>/dev/null || echo "0")
+              DIR_LOW=$(jq -r '[.result.libraries[]?.vulnerabilities[]? | select(.severity == "LOW" or .severity == "INFO")] | length' dir-results.json 2>/dev/null || echo "0")
+
+              echo "**Found:** ${DIR_VULN_TOTAL} vulnerabilities (${DIR_CRITICAL} Critical, ${DIR_HIGH} High, ${DIR_MEDIUM} Medium, ${DIR_LOW} Low/Info)" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+
+              # Show Critical + High + Medium in the table
+              SHOW_VULNS=$(jq -r '[.result.libraries[]?.vulnerabilities[]? | select(.severity == "CRITICAL" or .severity == "HIGH" or .severity == "MEDIUM")] | length' dir-results.json 2>/dev/null || echo "0")
+
+              if [ "${SHOW_VULNS}" -gt 0 ]; then
+                echo "| # | Package | CVE | Severity | Version | Fix Version | Path |" >> $GITHUB_STEP_SUMMARY
+                echo "|---|---------|-----|----------|---------|-------------|------|" >> $GITHUB_STEP_SUMMARY
+
+                jq -r '.result.libraries[]? | select(.vulnerabilities != null) | . as $lib | .vulnerabilities[]? | select(.severity == "CRITICAL" or .severity == "HIGH" or .severity == "MEDIUM") | "\($lib.name)|\(.name)|\(.severity)|\($lib.version)|\(.fixedVersion // "No fix available")|\($lib.path // "/go.mod")"' dir-results.json 2>/dev/null | \
+                  sort -t'|' -k3r | \
+                  nl -w1 -s'|' | while IFS='|' read -r num pkg cve severity version fix path; do
+                    echo "| ${num} | ${pkg} | ${cve} | ${severity} | ${version} | ${fix} | \`${path}\` |" >> $GITHUB_STEP_SUMMARY
+                  done
+
+                echo "" >> $GITHUB_STEP_SUMMARY
+              fi
+
+              if [ "${DIR_LOW}" -gt 0 ]; then
+                echo "> ℹ️ ${DIR_LOW} Low/Info severity finding(s) omitted from table." >> $GITHUB_STEP_SUMMARY
+                echo "" >> $GITHUB_STEP_SUMMARY
+              fi
+
+              echo "> **Note:** These are source-level findings from \`go.mod\` declarations. Check the **Docker Image Scan** job to confirm which vulnerabilities are actually compiled into the production binary." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "✅ No library vulnerabilities found in source files." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Secrets findings from directory scan
+            DIR_SECRETS=$(jq -r '[.result.secrets[]?] | length' dir-results.json 2>/dev/null || echo "0")
+            if [ "${DIR_SECRETS}" -gt 0 ]; then
+              echo "### ⚠️ Secrets Detection" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**${DIR_SECRETS} secret(s) detected in source files.**" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "| # | Type | Path | Description |" >> $GITHUB_STEP_SUMMARY
+              echo "|---|------|------|-------------|" >> $GITHUB_STEP_SUMMARY
+              jq -r '.result.secrets[]? | "\(.type // "Unknown")|\(.path // "N/A")|\(.description // "Secret detected")"' dir-results.json 2>/dev/null | \
+                nl -w1 -s'|' | while IFS='|' read -r num type path desc; do
+                  echo "| ${num} | ${type} | \`${path}\` | ${desc} |" >> $GITHUB_STEP_SUMMARY
+                done
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "⚠️ Directory scan results not available (JSON missing or invalid)." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
