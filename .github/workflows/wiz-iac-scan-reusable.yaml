@@ -35,6 +35,13 @@ jobs:
       pull-requests: write
 
     steps:
+      - name: Validate required secrets
+        run: |
+          if [ -z "${{ secrets.WIZ_CLIENT_ID }}" ] || [ -z "${{ secrets.WIZ_CLIENT_SECRET }}" ]; then
+            echo "::error::Missing required secrets: WIZ_CLIENT_ID and WIZ_CLIENT_SECRET must be configured"
+            exit 1
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -99,6 +106,7 @@ jobs:
           echo "### IaC Scan (Dockerfile, Helm, Kubernetes Misconfigurations)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
+          IAC_HIGH=0
           if [ -f "iac-results.json" ] && jq empty iac-results.json 2>/dev/null; then
             IAC_FINDINGS=$(jq -r '[.result.iacFindings[]?] | length' iac-results.json 2>/dev/null || echo "0")
             IAC_HIGH=$(jq -r '[.result.iacFindings[]? | select(.severity == "HIGH" or .severity == "CRITICAL")] | length' iac-results.json 2>/dev/null || echo "0")
@@ -128,10 +136,14 @@ jobs:
           fi
 
           # ═══════════════════════════════════════════════════════════
-          # Directory Scan — Source-Level Library Vulnerabilities
+          # Directory Scan — Libraries, Secrets & Sensitive Data
           # ═══════════════════════════════════════════════════════════
-          echo "### Directory Scan (Source-Level Library Vulnerabilities)" >> $GITHUB_STEP_SUMMARY
+          echo "### Directory Scan (Source-Level Libraries, Secrets & Sensitive Data)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+
+          DIR_CRITICAL=0
+          DIR_HIGH=0
+          DIR_SECRETS=0
 
           if [ -f "dir-results.json" ] && jq empty dir-results.json 2>/dev/null; then
             DIR_VULN_TOTAL=$(jq -r '[.result.libraries[]?.vulnerabilities[]?] | length' dir-results.json 2>/dev/null || echo "0")
@@ -145,7 +157,6 @@ jobs:
               echo "**Found:** ${DIR_VULN_TOTAL} vulnerabilities (${DIR_CRITICAL} Critical, ${DIR_HIGH} High, ${DIR_MEDIUM} Medium, ${DIR_LOW} Low/Info)" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
 
-              # Show Critical + High + Medium in the table
               SHOW_VULNS=$(jq -r '[.result.libraries[]?.vulnerabilities[]? | select(.severity == "CRITICAL" or .severity == "HIGH" or .severity == "MEDIUM")] | length' dir-results.json 2>/dev/null || echo "0")
 
               if [ "${SHOW_VULNS}" -gt 0 ]; then
@@ -173,12 +184,10 @@ jobs:
               echo "" >> $GITHUB_STEP_SUMMARY
             fi
 
-            # Secrets findings from directory scan
+            # Secrets & Sensitive Data findings
             DIR_SECRETS=$(jq -r '[.result.secrets[]?] | length' dir-results.json 2>/dev/null || echo "0")
             if [ "${DIR_SECRETS}" -gt 0 ]; then
-              echo "### ⚠️ Secrets Detection" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "**${DIR_SECRETS} secret(s) detected in source files.**" >> $GITHUB_STEP_SUMMARY
+              echo "⚠️ **${DIR_SECRETS} secret(s) detected in source files:**" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "| Type | Location | Description |" >> $GITHUB_STEP_SUMMARY
               echo "|------|----------|-------------|" >> $GITHUB_STEP_SUMMARY
@@ -187,8 +196,38 @@ jobs:
                   echo "| ${type} | \`${location}\` | ${desc} |" >> $GITHUB_STEP_SUMMARY
                 done
               echo "" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "✅ No secrets or sensitive data found." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
             fi
           else
             echo "⚠️ Directory scan results not available (JSON missing or invalid)." >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # ═══════════════════════════════════════════════════════════
+          # Overall Result
+          # ═══════════════════════════════════════════════════════════
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${IAC_HIGH}" -gt 0 ] || [ "${DIR_HIGH}" -gt 0 ] || [ "${DIR_CRITICAL}" -gt 0 ] || [ "${DIR_SECRETS}" -gt 0 ]; then
+            echo "### Findings Detected - Review Recommended" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Recommended Actions:**" >> $GITHUB_STEP_SUMMARY
+            echo "1. Review the IaC misconfigurations and library vulnerabilities above" >> $GITHUB_STEP_SUMMARY
+            echo "2. Address Critical and High severity findings" >> $GITHUB_STEP_SUMMARY
+            if [ "${DIR_SECRETS}" -gt 0 ]; then
+              echo "3. Remove any detected secrets from source files" >> $GITHUB_STEP_SUMMARY
+              echo "4. Check the **Docker Image Scan** to confirm which are in the production binary" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "3. Check the **Docker Image Scan** to confirm which are in the production binary" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "::warning::IaC/Directory scan findings detected - Review recommended"
+          else
+            echo "### Scan Complete: No High-Risk Findings" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "No critical or high severity misconfigurations, library vulnerabilities, or secrets detected in source files." >> $GITHUB_STEP_SUMMARY
+            echo "::notice::IaC & Directory scan complete - No high-risk findings"
           fi
