@@ -231,3 +231,75 @@ jobs:
             echo "No critical or high severity misconfigurations, library vulnerabilities, or secrets detected in source files." >> $GITHUB_STEP_SUMMARY
             echo "::notice::IaC & Directory scan complete - No high-risk findings"
           fi
+
+      - name: Post PR Comment
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            let iacFindings = 0, iacHighCritical = 0;
+            let dirVulnTotal = 0, dirCritical = 0, dirHigh = 0, dirSecrets = 0;
+
+            try {
+              const iacData = JSON.parse(fs.readFileSync('iac-results.json', 'utf8'));
+              const findings = (iacData?.result?.iacFindings || []);
+              iacFindings = findings.length;
+              iacHighCritical = findings.filter(f => f.severity === 'HIGH' || f.severity === 'CRITICAL').length;
+            } catch(e) { core.warning('Could not parse iac-results.json: ' + e.message); }
+
+            try {
+              const dirData = JSON.parse(fs.readFileSync('dir-results.json', 'utf8'));
+              const vulns = (dirData?.result?.libraries || []).flatMap(l => l.vulnerabilities || []);
+              dirVulnTotal = vulns.length;
+              dirCritical = vulns.filter(v => v.severity === 'CRITICAL').length;
+              dirHigh = vulns.filter(v => v.severity === 'HIGH').length;
+              dirSecrets = (dirData?.result?.secrets || []).length;
+            } catch(e) { core.warning('Could not parse dir-results.json: ' + e.message); }
+
+            const hasFindings = iacHighCritical > 0 || dirCritical > 0 || dirHigh > 0 || dirSecrets > 0;
+            const statusText = hasFindings ? 'Findings Detected - Review Recommended' : 'No High-Risk Findings';
+
+            const summary =
+              "## Wiz IaC & Directory Scan Results\n\n" +
+              "> **AUDIT MODE** - Findings are reported for visibility. Builds are not blocked.\n\n" +
+              "### Overall Status: " + statusText + "\n\n" +
+              "---\n\n" +
+              "### Quick Summary\n\n" +
+              "| Scan | Status | Findings |\n" +
+              "|------|--------|----------|\n" +
+              "| IaC Misconfigurations | " + (iacHighCritical > 0 ? ':warning: Findings Detected' : ':white_check_mark: Passed') + " | " + iacFindings + " total (" + iacHighCritical + " High/Critical) |\n" +
+              "| Library Vulnerabilities | " + (dirCritical > 0 || dirHigh > 0 ? ':warning: Findings Detected' : ':white_check_mark: Passed') + " | " + dirVulnTotal + " total (" + dirCritical + " Critical, " + dirHigh + " High) |\n" +
+              "| Secrets in Source | " + (dirSecrets > 0 ? ':warning: Findings Detected' : ':white_check_mark: Passed') + " | " + dirSecrets + " found |\n\n" +
+              "---\n\n" +
+              "For full findings detail and remediation steps, view the **[Actions run summary](" +
+              context.payload.repository.html_url + "/actions/runs/" + context.runId + ")**.\n\n" +
+              "<sub>This comment will be updated on each commit</sub>";
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' &&
+              c.body.includes('Wiz IaC & Directory Scan Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: summary
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: summary
+              });
+            }
