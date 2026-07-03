@@ -179,6 +179,8 @@ jobs:
       - name: Build Docker image
         id: build
         continue-on-error: true
+        env:
+          GITPAT: ${{ secrets.GITPAT }}
         run: |
           # Determine Dockerfile path
           if [ -n "${{ inputs.dockerfile-path }}" ]; then
